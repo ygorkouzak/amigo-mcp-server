@@ -7,109 +7,151 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-// Configurações
-const AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"; // Base URL
+// --- CONFIGURAÇÕES GERAIS ---
+// Estas variáveis serão preenchidas automaticamente pelo Render
 const PORT = process.env.PORT || 3000;
+const AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br";
+const API_TOKEN = process.env.AMIGO_API_TOKEN;
 
-// Inicializa o servidor Express (para hospedar o MCP no Render)
+// IDs DA CLÍNICA (Carregados do Render)
+const CONFIG = {
+  PLACE_ID: Number(process.env.PLACE_ID),      // Unidade
+  EVENT_ID: Number(process.env.EVENT_ID),      // Tipo de Procedimento
+  ACCOUNT_ID: Number(process.env.ACCOUNT_ID),  // Conta da Empresa
+  USER_ID: Number(process.env.USER_ID),        // Médico Padrão
+  INSURANCE_ID: Number(process.env.INSURANCE_ID) || 1 // 1 = Particular
+};
+
 const app = express();
 app.use(cors());
 
-// Inicializa o Servidor MCP
+// --- INICIALIZAÇÃO DO SERVIDOR MCP ---
 const server = new McpServer({
   name: "amigo-scheduler",
   version: "1.0.0",
 });
 
-// --- FERRAMENTA 1: Consultar Horários ---
+// --- FERRAMENTA 1: BUSCAR PACIENTE ---
+// Essencial para descobrir o ID do paciente antes de agendar
 server.tool(
-  "consultar_horarios",
-  "Consulta os horários disponíveis na agenda para uma data específica.",
+  "buscar_paciente",
+  "Busca um paciente pelo nome ou CPF para encontrar seu ID interno.",
   {
-    data: { type: "string", description: "Data no formato AAAA-MM-DD (ex: 2025-10-25)" },
-    profissional_id: { type: "string", description: "ID do médico/profissional (opcional se houver apenas um)" }
+    nome: { type: "string", description: "Nome parcial ou completo do paciente" },
+    cpf: { type: "string", description: "CPF do paciente (opcional)" }
   },
-  async ({ data, profissional_id }) => {
+  async ({ nome, cpf }) => {
     try {
-      // DICA: Verifique no Swagger qual o endpoint exato de GET calendário
-      // Estou assumindo /Calendário baseado no seu link
-      const response = await axios.get(`${AMIGO_API_URL}/api/Calendario`, {
-        params: { date: data, profissional: profissional_id },
-        headers: {
-          // O Token virá das variaveis de ambiente do Render
-          "Authorization": `Bearer ${process.env.AMIGO_API_TOKEN}`,
-          "Content-Type": "application/json"
-        }
+      console.log(`Buscando paciente: ${nome || cpf}`);
+      const response = await axios.get(`${AMIGO_API_URL}/patients`, {
+        params: { name: nome, cpf: cpf }, // A API filtra por estes campos
+        headers: { "Authorization": `Bearer ${API_TOKEN}` }
       });
 
-      // Retorna os dados limpos para a IA
+      // Retorna lista simplificada para a IA não se perder
+      const resultados = response.data.map((p: any) => ({
+        id: p.id,
+        nome: p.name,
+        telefone: p.contact_cellphone || p.cellphone,
+        nascimento: p.born
+      }));
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(resultados) }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Erro ao buscar paciente: ${JSON.stringify(error.response?.data || error.message)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// --- FERRAMENTA 2: CONSULTAR HORÁRIOS ---
+server.tool(
+  "consultar_horarios",
+  "Consulta horários disponíveis na agenda.",
+  {
+    data: { type: "string", description: "Data no formato YYYY-MM-DD (Ex: 2024-12-25)" }
+  },
+  async ({ data }) => {
+    try {
+      const response = await axios.get(`${AMIGO_API_URL}/calendar`, {
+        params: {
+          date: data,
+          event_id: CONFIG.EVENT_ID,
+          place_id: CONFIG.PLACE_ID,
+          insurance_id: CONFIG.INSURANCE_ID
+        },
+        headers: { "Authorization": `Bearer ${API_TOKEN}` }
+      });
+
       return {
         content: [{ type: "text", text: JSON.stringify(response.data) }]
       };
     } catch (error: any) {
       return {
-        content: [{ type: "text", text: `Erro ao buscar horários: ${error.message}` }],
+        content: [{ type: "text", text: `Erro ao ver agenda: ${JSON.stringify(error.response?.data || error.message)}` }],
         isError: true,
       };
     }
   }
 );
 
-// --- FERRAMENTA 2: Agendar Consulta ---
+// --- FERRAMENTA 3: AGENDAR CONSULTA ---
 server.tool(
   "agendar_consulta",
-  "Realiza o agendamento de um novo atendimento.",
+  "Realiza o agendamento final.",
   {
-    paciente_nome: { type: "string", description: "Nome do paciente" },
-    paciente_telefone: { type: "string", description: "Telefone do paciente" },
-    data_horario: { type: "string", description: "Data e hora ISO (ex: 2025-10-25T14:00:00)" },
-    profissional_id: { type: "string", description: "ID do médico" }
+    start_date: { type: "string", description: "Data e hora exata: 'YYYY-MM-DD HH:mm'" },
+    patient_id: { type: "string", description: "O ID numérico do paciente (obtido na busca)" },
+    telefone: { type: "string", description: "Telefone do paciente (apenas números)" }
   },
   async (args) => {
     try {
-      // DICA: Ajuste este body conforme o Swagger "addAttendance"
       const body = {
-        name: args.paciente_nome,
-        phone: args.paciente_telefone,
-        start_date: args.data_horario,
-        professional_id: args.profissional_id,
-        status: "SCHEDULED" // Exemplo
+        insurance_id: CONFIG.INSURANCE_ID,
+        event_id: CONFIG.EVENT_ID,
+        user_id: CONFIG.USER_ID,
+        place_id: CONFIG.PLACE_ID,
+        start_date: args.start_date,
+        patient_id: Number(args.patient_id),
+        account_id: CONFIG.ACCOUNT_ID,
+        chat_id: "whatsapp_integration",
+        scheduler_phone_dial_code: "55",
+        scheduler_phone: args.telefone || "000000000",
+        is_dependent_schedule: false
       };
 
-      const response = await axios.post(`${AMIGO_API_URL}/api/Atendimentos/addAttendance`, body, {
-        headers: {
-          "Authorization": `Bearer ${process.env.AMIGO_API_TOKEN}`,
-          "Content-Type": "application/json"
-        }
+      console.log("Enviando agendamento:", body);
+
+      const response = await axios.post(`${AMIGO_API_URL}/attendances`, body, {
+        headers: { "Authorization": `Bearer ${API_TOKEN}` }
       });
 
       return {
-        content: [{ type: "text", text: `Agendamento realizado com sucesso! ID: ${response.data.id}` }]
+        content: [{ type: "text", text: `Sucesso! Agendamento ID: ${JSON.stringify(response.data.id || response.data)}` }]
       };
     } catch (error: any) {
       return {
-        content: [{ type: "text", text: `Erro ao agendar: ${error.message}` }],
+        content: [{ type: "text", text: `Erro ao agendar: ${JSON.stringify(error.response?.data || error.message)}` }],
         isError: true,
       };
     }
   }
 );
 
-// --- Configuração do Transporte SSE (Server-Sent Events) ---
-// Isso é necessário para conectar via HTTP (Double X <-> Render)
+// --- ROTAS DO SERVIDOR ---
+app.get("/health", (req, res) => { res.send("Running OK"); });
+
 app.get("/sse", async (req, res) => {
   const transport = new SSEServerTransport("/messages", res);
   await server.connect(transport);
 });
 
-app.post("/messages", async (req, res) => {
-  // Nota: Em uma implementação real completa, você precisa gerenciar 
-  // sessões SSE aqui, mas para um teste simples single-instance:
-  // O MCP SDK gerencia a maior parte da lógica se conectado corretamente.
-  // Para Render + MCP simples, o endpoint /sse é o principal.
-  res.sendStatus(200);
-});
+app.post("/messages", async (req, res) => { res.sendStatus(200); });
 
 app.listen(PORT, () => {
-  console.log(`Servidor MCP rodando na porta ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
