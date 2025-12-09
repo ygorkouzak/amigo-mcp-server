@@ -1,15 +1,15 @@
 {
-  "name": "amigo-mcp-server",
+  "name": "amigo-mcp",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.6.0",
+    "@modelcontextprotocol/sdk": "^1.0.1",
     "express": "^4.21.1",
-    "cors": "^2.8.5",
     "axios": "^1.7.7",
-    "swagger-parser": "^10.0.3"
+    "swagger-parser": "^10.0.3",
+    "cors": "^2.8.5"
   }
 }
