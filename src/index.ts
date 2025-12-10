@@ -1,5 +1,6 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+// ATENÇÃO: Importações sem o final .js para compatibilidade com TSX/Bundler
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse";
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -7,48 +8,45 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-// --- CONFIGURAÇÕES GERAIS ---
-// Estas variáveis serão preenchidas automaticamente pelo Render
+// --- CONFIGURAÇÕES ---
 const PORT = process.env.PORT || 3000;
 const AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br";
 const API_TOKEN = process.env.AMIGO_API_TOKEN;
 
-// IDs DA CLÍNICA (Carregados do Render)
+// IDs DA CLÍNICA
 const CONFIG = {
-  PLACE_ID: Number(process.env.PLACE_ID),      // Unidade
-  EVENT_ID: Number(process.env.EVENT_ID),      // Tipo de Procedimento
-  ACCOUNT_ID: Number(process.env.ACCOUNT_ID),  // Conta da Empresa
-  USER_ID: Number(process.env.USER_ID),        // Médico Padrão
-  INSURANCE_ID: Number(process.env.INSURANCE_ID) || 1 // 1 = Particular
+  PLACE_ID: Number(process.env.PLACE_ID),
+  EVENT_ID: Number(process.env.EVENT_ID),
+  ACCOUNT_ID: Number(process.env.ACCOUNT_ID),
+  USER_ID: Number(process.env.USER_ID),
+  INSURANCE_ID: Number(process.env.INSURANCE_ID) || 1
 };
 
 const app = express();
 app.use(cors());
 
-// --- INICIALIZAÇÃO DO SERVIDOR MCP ---
+// --- SERVIDOR MCP ---
 const server = new McpServer({
   name: "amigo-scheduler",
   version: "1.0.0",
 });
 
 // --- FERRAMENTA 1: BUSCAR PACIENTE ---
-// Essencial para descobrir o ID do paciente antes de agendar
 server.tool(
   "buscar_paciente",
   "Busca um paciente pelo nome ou CPF para encontrar seu ID interno.",
   {
-    nome: { type: "string", description: "Nome parcial ou completo do paciente" },
+    nome: { type: "string", description: "Nome do paciente" },
     cpf: { type: "string", description: "CPF do paciente (opcional)" }
   },
   async ({ nome, cpf }) => {
     try {
       console.log(`Buscando paciente: ${nome || cpf}`);
       const response = await axios.get(`${AMIGO_API_URL}/patients`, {
-        params: { name: nome, cpf: cpf }, // A API filtra por estes campos
+        params: { name: nome, cpf: cpf },
         headers: { "Authorization": `Bearer ${API_TOKEN}` }
       });
 
-      // Retorna lista simplificada para a IA não se perder
       const resultados = response.data.map((p: any) => ({
         id: p.id,
         nome: p.name,
@@ -61,7 +59,7 @@ server.tool(
       };
     } catch (error: any) {
       return {
-        content: [{ type: "text", text: `Erro ao buscar paciente: ${JSON.stringify(error.response?.data || error.message)}` }],
+        content: [{ type: "text", text: `Erro ao buscar: ${JSON.stringify(error.response?.data || error.message)}` }],
         isError: true,
       };
     }
@@ -73,7 +71,7 @@ server.tool(
   "consultar_horarios",
   "Consulta horários disponíveis na agenda.",
   {
-    data: { type: "string", description: "Data no formato YYYY-MM-DD (Ex: 2024-12-25)" }
+    data: { type: "string", description: "Data no formato YYYY-MM-DD" }
   },
   async ({ data }) => {
     try {
@@ -105,8 +103,8 @@ server.tool(
   "Realiza o agendamento final.",
   {
     start_date: { type: "string", description: "Data e hora exata: 'YYYY-MM-DD HH:mm'" },
-    patient_id: { type: "string", description: "O ID numérico do paciente (obtido na busca)" },
-    telefone: { type: "string", description: "Telefone do paciente (apenas números)" }
+    patient_id: { type: "string", description: "ID numérico do paciente" },
+    telefone: { type: "string", description: "Telefone apenas números" }
   },
   async (args) => {
     try {
@@ -124,14 +122,14 @@ server.tool(
         is_dependent_schedule: false
       };
 
-      console.log("Enviando agendamento:", body);
+      console.log("Agendando...", body);
 
       const response = await axios.post(`${AMIGO_API_URL}/attendances`, body, {
         headers: { "Authorization": `Bearer ${API_TOKEN}` }
       });
 
       return {
-        content: [{ type: "text", text: `Sucesso! Agendamento ID: ${JSON.stringify(response.data.id || response.data)}` }]
+        content: [{ type: "text", text: `Sucesso! ID: ${JSON.stringify(response.data.id || response.data)}` }]
       };
     } catch (error: any) {
       return {
@@ -142,10 +140,11 @@ server.tool(
   }
 );
 
-// --- ROTAS DO SERVIDOR ---
+// --- ROTAS ---
 app.get("/health", (req, res) => { res.send("Running OK"); });
 
 app.get("/sse", async (req, res) => {
+  console.log("Conexão SSE iniciada");
   const transport = new SSEServerTransport("/messages", res);
   await server.connect(transport);
 });
