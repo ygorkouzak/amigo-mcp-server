@@ -1,5 +1,5 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { Server } from "@modelcontextprotocol/sdk/server";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/transports/node";
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -23,9 +23,10 @@ const CONFIG = {
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 // --- SERVIDOR MCP ---
-const server = new McpServer({
+const server = new Server({
   name: "amigo-scheduler",
   version: "1.0.0",
 });
@@ -40,7 +41,6 @@ server.tool(
   },
   async ({ nome, cpf }) => {
     try {
-      console.log(`Buscando paciente: ${nome || cpf}`);
       const response = await axios.get(`${AMIGO_API_URL}/patients`, {
         params: { name: nome, cpf: cpf },
         headers: { "Authorization": `Bearer ${API_TOKEN}` }
@@ -121,8 +121,6 @@ server.tool(
         is_dependent_schedule: false
       };
 
-      console.log("Agendando...", body);
-
       const response = await axios.post(`${AMIGO_API_URL}/attendances`, body, {
         headers: { "Authorization": `Bearer ${API_TOKEN}` }
       });
@@ -140,7 +138,7 @@ server.tool(
 );
 
 // --- ROTAS ---
-app.get("/health", (req, res) => { res.send("Running OK"); });
+app.get("/health", (req, res) => res.send("Running OK"));
 
 app.get("/sse", async (req, res) => {
   console.log("Conexão SSE iniciada");
@@ -148,7 +146,7 @@ app.get("/sse", async (req, res) => {
   await server.connect(transport);
 });
 
-app.post("/messages", async (req, res) => { res.sendStatus(200); });
+app.post("/messages", (req, res) => res.sendStatus(200));
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
