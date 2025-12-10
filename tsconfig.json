@@ -1,14 +1,14 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "outDir": "./build",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "rootDir": "./src",
+    "outDir": "./dist",
     "strict": false,
     "noImplicitAny": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true
+    "allowSyntheticDefaultImports": true
   }
 }
