@@ -1,4 +1,4 @@
-// ATENÇÃO: Importações sem o final .js para compatibilidade com TSX/Bundler
+// IMPORTANTE: Sem .js no final para respeitar o 'exports' da biblioteca
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse";
 import express from "express";
