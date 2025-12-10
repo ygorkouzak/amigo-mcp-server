@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Servidor MCP para conectar Double X a Amigo App",
   "main": "build/index.js",
+  "type": "module",
   "scripts": {
     "start": "node build/index.js",
     "build": "tsc",
