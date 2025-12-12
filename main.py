@@ -15,6 +15,7 @@ CONFIG = {
     "INSURANCE_ID": os.getenv("INSURANCE_ID", "1")
 }
 
+# Inicializa o FastMCP
 mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
@@ -69,3 +70,8 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
             return f"Agendamento realizado: {str(response.json())}"
         except Exception as e:
             return f"Erro: {str(e)}"
+
+# --- PULO DO GATO ---
+# Isso expõe a aplicação Starlette interna para o Uvicorn poder rodar
+# O erro anterior acontecia porque 'mcp' sozinho não é um servidor web, mas '_sse_app' é.
+starlette_app = mcp._sse_app
