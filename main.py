@@ -1,6 +1,8 @@
 import os
 import httpx
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import Response
 
 # Configurações via Variáveis de Ambiente
 AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
@@ -71,6 +73,17 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro: {str(e)}"
 
-# --- A CORREÇÃO ESTÁ AQUI EMBAIXO ---
-# Isso extrai o servidor web real de dentro do gerenciador mcp
+# --- GAMBIARRA TÉCNICA PARA O DOUBLE X ---
+# Pegamos o servidor web real
 starlette_app = mcp.sse_app
+
+# Criamos uma função que pega os erros do Double X e corrige
+async def redirecionar_mensagens(request: Request):
+    # Procura a rota oficial de mensagens e repassa o pedido para lá
+    for route in starlette_app.routes:
+        if hasattr(route, "path") and route.path == "/messages":
+            return await route.endpoint(request)
+    return Response("Erro interno: rota /messages não encontrada", status_code=500)
+
+# Adicionamos essa função para aceitar POST na rota /sse
+starlette_app.add_route("/sse", redirecionar_mensagens, methods=["POST"])
