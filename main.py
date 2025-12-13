@@ -15,6 +15,7 @@ CONFIG = {
     "INSURANCE_ID": os.getenv("INSURANCE_ID", "1")
 }
 
+# Inicializa o FastMCP
 mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
@@ -69,3 +70,7 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
             return f"Agendamento realizado: {str(response.json())}"
         except Exception as e:
             return f"Erro: {str(e)}"
+
+# --- A CORREÇÃO ESTÁ AQUI EMBAIXO ---
+# Isso extrai o servidor web real de dentro do gerenciador mcp
+starlette_app = mcp.sse_app
