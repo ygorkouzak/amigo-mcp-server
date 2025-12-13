@@ -4,11 +4,10 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import Response
 
-# Configurações via Variáveis de Ambiente
+# Configurações
 AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
 API_TOKEN = os.getenv("AMIGO_API_TOKEN")
 
-# IDs da Clínica
 CONFIG = {
     "PLACE_ID": os.getenv("PLACE_ID"),
     "EVENT_ID": os.getenv("EVENT_ID"),
@@ -20,12 +19,12 @@ CONFIG = {
 # Inicializa o FastMCP
 mcp = FastMCP("amigo-scheduler")
 
+# --- SUAS FERRAMENTAS (Mantidas Iguais) ---
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     """Busca um paciente pelo nome ou CPF."""
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {"name": nome, "cpf": cpf}
-    
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{AMIGO_API_URL}/patients", params=params, headers=headers)
@@ -73,17 +72,18 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro: {str(e)}"
 
-# --- GAMBIARRA TÉCNICA PARA O DOUBLE X ---
-# Pegamos o servidor web real
+# --- CORREÇÃO DE ROTA PARA CLIENTES CONFUSOS ---
 starlette_app = mcp.sse_app
 
-# Criamos uma função que pega os erros do Double X e corrige
-async def redirecionar_mensagens(request: Request):
-    # Procura a rota oficial de mensagens e repassa o pedido para lá
-    for route in starlette_app.routes:
-        if hasattr(route, "path") and route.path == "/messages":
-            return await route.endpoint(request)
-    return Response("Erro interno: rota /messages não encontrada", status_code=500)
+# Adiciona um redirecionamento manual: Se tentarem POST em /sse, joga para /messages
+@starlette_app.post("/sse")
+async def handle_sse_post(request: Request):
+    # Redireciona internamente a requisição para a rota correta de mensagens
+    from mcp.server.sse import messages_handler
+    # Precisamos chamar o handler de mensagens manualmente
+    return await messages_handler(request)
 
-# Adicionamos essa função para aceitar POST na rota /sse
-starlette_app.add_route("/sse", redirecionar_mensagens, methods=["POST"])
+# Adiciona uma rota de verificação simples
+@starlette_app.get("/health")
+async def health_check():
+    return {"status": "ok", "tools": len(mcp._tools)}
