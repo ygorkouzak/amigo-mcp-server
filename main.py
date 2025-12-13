@@ -1,10 +1,11 @@
 import os
 import httpx
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
 from starlette.requests import Request
-from starlette.responses import Response
 
-# Configurações
+# --- CONFIGURAÇÕES ---
 AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
 API_TOKEN = os.getenv("AMIGO_API_TOKEN")
 
@@ -16,10 +17,9 @@ CONFIG = {
     "INSURANCE_ID": os.getenv("INSURANCE_ID", "1")
 }
 
-# Inicializa o FastMCP
+# --- DEFINIÇÃO DAS FERRAMENTAS MCP ---
 mcp = FastMCP("amigo-scheduler")
 
-# --- SUAS FERRAMENTAS (Mantidas Iguais) ---
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     """Busca um paciente pelo nome ou CPF."""
@@ -72,18 +72,26 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro: {str(e)}"
 
-# --- CORREÇÃO DE ROTA PARA CLIENTES CONFUSOS ---
-starlette_app = mcp.sse_app
+# --- ESTRATÉGIA DO ENVELOPE (CORREÇÃO DO ERRO) ---
 
-# Adiciona um redirecionamento manual: Se tentarem POST em /sse, joga para /messages
-@starlette_app.post("/sse")
-async def handle_sse_post(request: Request):
-    # Redireciona internamente a requisição para a rota correta de mensagens
-    from mcp.server.sse import messages_handler
-    # Precisamos chamar o handler de mensagens manualmente
-    return await messages_handler(request)
+# Pegamos o app original (que é uma função e não deixa adicionar rotas)
+mcp_asgi_app = mcp.sse_app
 
-# Adiciona uma rota de verificação simples
-@starlette_app.get("/health")
-async def health_check():
-    return {"status": "ok", "tools": len(mcp._tools)}
+async def handle_hack_post(request: Request):
+    """
+    Recebe o POST errado no /sse, muda o caminho para /messages
+    e repassa para o app original do MCP.
+    """
+    scope = request.scope
+    scope["path"] = "/messages"  # Engana o app original
+    # Chama o app original com o caminho corrigido
+    await mcp_asgi_app(scope, request.receive, request.send)
+
+# Criamos um app Starlette NOVO que nós controlamos
+starlette_app = Starlette(routes=[
+    # 1. Prioridade: Se for POST em /sse, usa nosso hack
+    Route("/sse", handle_hack_post, methods=["POST"]),
+    
+    # 2. Todo o resto (GET /sse, POST /messages, etc) vai para o MCP original
+    Mount("/", app=mcp_asgi_app)
+])
