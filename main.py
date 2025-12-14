@@ -1,22 +1,22 @@
 import os
 import httpx
-import inspect
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 
-# --- CONFIGURAÇÕES DE AMBIENTE E FALLBACKS ---
-# Usamos os valores da sua imagem como padrão caso o ENV falhe
+# --- CONFIGURAÇÕES DE AMBIENTE ---
 def get_config(key, default):
     val = os.getenv(key)
-    if val and val.strip(): # Garante que não é vazio
+    if val and val.strip():
         return val
     return default
 
 AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
-API_TOKEN = os.getenv("AMIGO_API_TOKEN") # O Token DEVE estar no Render
+API_TOKEN = os.getenv("AMIGO_API_TOKEN")
 
-# Seus IDs (Baseados nas imagens enviadas)
+# IDs configurados (com fallback para os valores da sua imagem)
 CONFIG = {
     "PLACE_ID": int(get_config("PLACE_ID", 6955)),
     "EVENT_ID": int(get_config("EVENT_ID", 526436)),
@@ -36,12 +36,11 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{AMIGO_API_URL}/patients", params=params, headers=headers)
-            # Retorna erro amigável se o token falhar
             if response.status_code == 401:
-                return "Erro: Token de API inválido ou expirado."
+                return "Erro: Token inválido."
             return str(response.json())
         except Exception as e:
-            return f"Erro ao buscar paciente: {str(e)}"
+            return f"Erro: {str(e)}"
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
@@ -58,7 +57,7 @@ async def consultar_horarios(data: str) -> str:
             response = await client.get(f"{AMIGO_API_URL}/calendar", params=params, headers=headers)
             return str(response.json())
         except Exception as e:
-            return f"Erro ao consultar agenda: {str(e)}"
+            return f"Erro: {str(e)}"
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
@@ -79,54 +78,48 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(f"{AMIGO_API_URL}/attendances", json=body, headers=headers)
-            return f"Agendamento realizado com sucesso! Detalhes: {str(response.json())}"
+            return f"Sucesso: {str(response.json())}"
         except Exception as e:
-            return f"Erro ao agendar: {str(e)}"
+            return f"Erro: {str(e)}"
 
-# --- ADAPTADOR UNIVERSAL (A Correção Definitiva) ---
+# --- CORREÇÃO FINAL (Estratégia: Envelope Cego) ---
 
-# 1. Obtemos o app Starlette oficial
-print("Iniciando configuração do servidor...")
-starlette_app = mcp.sse_app()
+# 1. Pegamos o app original (chamando a função fábrica corretamente)
+mcp_asgi_app = mcp.sse_app()
 
-# 2. Encontramos quem é o responsável por processar mensagens (/messages)
-messages_endpoint = None
-for route in starlette_app.routes:
-    if getattr(route, "path", "") == "/messages":
-        messages_endpoint = route.endpoint
-        print("Endpoint de mensagens encontrado e capturado.")
-        break
+# 2. Handler de redirecionamento
+# (Simplesmente muda o destino para /messages e repassa para o app original)
+async def handle_compatibility_post(request: Request):
+    scope = request.scope
+    scope["path"] = "/messages"  # Truque de mágica: muda o destino
+    await mcp_asgi_app(scope, request.receive, request.send)
 
-if not messages_endpoint:
-    print("ALERTA CRÍTICO: Não foi possível encontrar o endpoint /messages original.")
-
-# 3. Lista de caminhos que o Double X tentou acessar (segundo seus logs)
-# Vamos redirecionar TODOS eles para o processador de mensagens
-rotas_de_resgate = [
-    "/sse",             # O Double X tenta POST aqui frequentemente
-    "/tools/list",      # Tentativa comum de descoberta
-    "/api/tools/list",  # Outra tentativa comum
-    "/mcp/tools/list",  # Outra variação
-    "/tools",           # Variação REST
-    "/api/tools"        # Variação REST
+# 3. Lista de rotas problemáticas (Baseado nos seus logs)
+bad_routes = [
+    "/sse",
+    "/tools/list",
+    "/api/tools/list",
+    "/mcp/tools/list",
+    "/tools",
+    "/api/tools"
 ]
 
-# 4. Registramos o processador oficial em todas essas rotas "erradas"
-if messages_endpoint:
-    for path in rotas_de_resgate:
-        # Aceitamos POST nessas rotas e entregamos para o MCP processar
-        starlette_app.add_route(path, messages_endpoint, methods=["POST"])
-        print(f"Rota de compatibilidade criada: POST {path} -> MCP Handler")
+# 4. Construção manual das rotas do Envelope
+routes = []
 
-# 5. Rota de Health Check (Para parar os 404 de monitoramento)
+# Adiciona o redirecionamento para cada rota ruim (apenas POST)
+for path in bad_routes:
+    routes.append(Route(path, handle_compatibility_post, methods=["POST"]))
+
+# Adiciona Health Check
 async def health_check(request):
-    return JSONResponse({
-        "status": "online", 
-        "mode": "compatibility_layer_active",
-        "config_check": {"place_id": CONFIG["PLACE_ID"]}
-    })
+    return JSONResponse({"status": "online", "mode": "envelope_active"})
+routes.append(Route("/health", health_check))
+routes.append(Route("/", health_check))
 
-starlette_app.add_route("/health", health_check, methods=["GET"])
-starlette_app.add_route("/", health_check, methods=["GET", "POST"]) # Raiz também responde
+# 5. IMPORTANTE: Monta o app original na raiz para tratar todo o resto
+# (Isso garante que o GET /sse continue funcionando para abrir a conexão)
+routes.append(Mount("/", app=mcp_asgi_app))
 
-print("Servidor pronto para deploy.")
+# 6. Cria o app final que o Uvicorn vai rodar
+starlette_app = Starlette(routes=routes)
