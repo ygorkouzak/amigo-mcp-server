@@ -1,12 +1,17 @@
 import os
 import httpx
+import logging
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-# --- CONFIGURAÇÕES DE AMBIENTE ---
+# --- LOGGING (Para vermos o que está acontecendo) ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("uvicorn")
+
+# --- CONFIGURAÇÕES ---
 def get_config(key, default):
     val = os.getenv(key)
     if val and val.strip():
@@ -16,7 +21,6 @@ def get_config(key, default):
 AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
 API_TOKEN = os.getenv("AMIGO_API_TOKEN")
 
-# IDs configurados (com fallback para os valores da sua imagem)
 CONFIG = {
     "PLACE_ID": int(get_config("PLACE_ID", 6955)),
     "EVENT_ID": int(get_config("EVENT_ID", 526436)),
@@ -24,6 +28,46 @@ CONFIG = {
     "USER_ID": int(get_config("USER_ID", 28904)),
     "INSURANCE_ID": int(get_config("INSURANCE_ID", 1))
 }
+
+# --- LISTA MANUAL DE FERRAMENTAS (O "Cardápio") ---
+# Isso serve para entregar ao Double X via GET se ele não fizer o handshake JSON-RPC
+TOOLS_SCHEMA = [
+    {
+        "name": "buscar_paciente",
+        "description": "Busca um paciente pelo nome ou CPF para encontrar seu ID interno.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "nome": {"type": "string", "description": "Nome do paciente"},
+                "cpf": {"type": "string", "description": "CPF do paciente"}
+            }
+        }
+    },
+    {
+        "name": "consultar_horarios",
+        "description": "Consulta horários disponíveis na agenda.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "data": {"type": "string", "description": "Data no formato YYYY-MM-DD"}
+            },
+            "required": ["data"]
+        }
+    },
+    {
+        "name": "agendar_consulta",
+        "description": "Realiza o agendamento final de uma consulta.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "start_date": {"type": "string", "description": "Data e hora exata (YYYY-MM-DD HH:mm)"},
+                "patient_id": {"type": "integer", "description": "ID do paciente"},
+                "telefone": {"type": "string", "description": "Telefone de contato"}
+            },
+            "required": ["start_date", "patient_id", "telefone"]
+        }
+    }
+]
 
 # --- SERVIDOR MCP ---
 mcp = FastMCP("amigo-scheduler")
@@ -36,8 +80,7 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{AMIGO_API_URL}/patients", params=params, headers=headers)
-            if response.status_code == 401:
-                return "Erro: Token inválido."
+            if response.status_code == 401: return "Erro: Token inválido."
             return str(response.json())
         except Exception as e:
             return f"Erro: {str(e)}"
@@ -61,7 +104,7 @@ async def consultar_horarios(data: str) -> str:
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Realiza o agendamento de uma consulta."""
+    """Realiza o agendamento."""
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     body = {
         "insurance_id": CONFIG["INSURANCE_ID"],
@@ -82,44 +125,43 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro: {str(e)}"
 
-# --- CORREÇÃO FINAL (Estratégia: Envelope Cego) ---
+# --- ROTEAMENTO INTELIGENTE ---
 
-# 1. Pegamos o app original (chamando a função fábrica corretamente)
 mcp_asgi_app = mcp.sse_app()
 
-# 2. Handler de redirecionamento
-# (Simplesmente muda o destino para /messages e repassa para o app original)
-async def handle_compatibility_post(request: Request):
+async def handle_post_compatibility(request: Request):
+    """Redireciona POSTs perdidos para /messages"""
     scope = request.scope
-    scope["path"] = "/messages"  # Truque de mágica: muda o destino
+    scope["path"] = "/messages"
     await mcp_asgi_app(scope, request.receive, request.send)
 
-# 3. Lista de rotas problemáticas (Baseado nos seus logs)
-bad_routes = [
-    "/sse",
-    "/tools/list",
-    "/api/tools/list",
-    "/mcp/tools/list",
-    "/tools",
-    "/api/tools"
-]
+async def handle_get_tools(request: Request):
+    """Entrega o cardápio (lista de ferramentas) via GET"""
+    return JSONResponse({
+        "tools": TOOLS_SCHEMA,
+        "_meta": "Manually exposed for compatibility"
+    })
 
-# 4. Construção manual das rotas do Envelope
+# Lista de rotas para interceptar
 routes = []
 
-# Adiciona o redirecionamento para cada rota ruim (apenas POST)
-for path in bad_routes:
-    routes.append(Route(path, handle_compatibility_post, methods=["POST"]))
+# 1. Rotas de POST (Compatibilidade JSON-RPC)
+post_paths = ["/sse", "/tools/list", "/api/tools/list"]
+for path in post_paths:
+    routes.append(Route(path, handle_post_compatibility, methods=["POST"]))
 
-# Adiciona Health Check
+# 2. Rotas de GET (Descoberta REST)
+get_paths = ["/tools", "/api/tools", "/tools/list"]
+for path in get_paths:
+    routes.append(Route(path, handle_get_tools, methods=["GET"]))
+
+# 3. Health Check
 async def health_check(request):
-    return JSONResponse({"status": "online", "mode": "envelope_active"})
+    return JSONResponse({"status": "online", "tools": len(TOOLS_SCHEMA)})
 routes.append(Route("/health", health_check))
 routes.append(Route("/", health_check))
 
-# 5. IMPORTANTE: Monta o app original na raiz para tratar todo o resto
-# (Isso garante que o GET /sse continue funcionando para abrir a conexão)
+# 4. Mount final para o app oficial
 routes.append(Mount("/", app=mcp_asgi_app))
 
-# 6. Cria o app final que o Uvicorn vai rodar
 starlette_app = Starlette(routes=routes)
