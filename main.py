@@ -1,9 +1,11 @@
 import os
 import httpx
+import inspect
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.requests import Request
+from starlette.responses import Response
 
 # --- CONFIGURAÇÕES ---
 AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
@@ -72,26 +74,32 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro: {str(e)}"
 
-# --- ESTRATÉGIA DO ENVELOPE (CORREÇÃO DO ERRO) ---
+# --- CORREÇÃO ROBUSTA E BLINDADA ---
 
-# Pegamos o app original (que é uma função e não deixa adicionar rotas)
-mcp_asgi_app = mcp.sse_app
+print(f"DEBUG: Verificando tipo de mcp.sse_app: {type(mcp.sse_app)}")
+
+# Lógica inteligente: Se for um método (fábrica), chama ele. Se já for o app, usa direto.
+if inspect.ismethod(mcp.sse_app) or inspect.isfunction(mcp.sse_app):
+    print("DEBUG: Detectado método fábrica. Chamando mcp.sse_app() com parenteses...")
+    mcp_asgi_app = mcp.sse_app()
+else:
+    print("DEBUG: Detectado objeto app. Usando mcp.sse_app direto.")
+    mcp_asgi_app = mcp.sse_app
+
+print(f"DEBUG: App final obtido: {type(mcp_asgi_app)}")
 
 async def handle_hack_post(request: Request):
     """
+    Hack para o Double X:
     Recebe o POST errado no /sse, muda o caminho para /messages
     e repassa para o app original do MCP.
     """
     scope = request.scope
-    scope["path"] = "/messages"  # Engana o app original
-    # Chama o app original com o caminho corrigido
+    scope["path"] = "/messages"
     await mcp_asgi_app(scope, request.receive, request.send)
 
-# Criamos um app Starlette NOVO que nós controlamos
+# Envelope Starlette
 starlette_app = Starlette(routes=[
-    # 1. Prioridade: Se for POST em /sse, usa nosso hack
     Route("/sse", handle_hack_post, methods=["POST"]),
-    
-    # 2. Todo o resto (GET /sse, POST /messages, etc) vai para o MCP original
     Mount("/", app=mcp_asgi_app)
 ])
