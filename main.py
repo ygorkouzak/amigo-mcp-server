@@ -1,17 +1,15 @@
 import os
 import httpx
-import logging
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import Route, Mount
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
-# --- LOGGING (Para vermos o que está acontecendo) ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("uvicorn")
-
-# --- CONFIGURAÇÕES ---
+# --- CONFIGURAÇÕES E IDs ---
+# Usamos os valores das suas imagens como padrão (fallback)
 def get_config(key, default):
     val = os.getenv(key)
     if val and val.strip():
@@ -28,46 +26,6 @@ CONFIG = {
     "USER_ID": int(get_config("USER_ID", 28904)),
     "INSURANCE_ID": int(get_config("INSURANCE_ID", 1))
 }
-
-# --- LISTA MANUAL DE FERRAMENTAS (O "Cardápio") ---
-# Isso serve para entregar ao Double X via GET se ele não fizer o handshake JSON-RPC
-TOOLS_SCHEMA = [
-    {
-        "name": "buscar_paciente",
-        "description": "Busca um paciente pelo nome ou CPF para encontrar seu ID interno.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "nome": {"type": "string", "description": "Nome do paciente"},
-                "cpf": {"type": "string", "description": "CPF do paciente"}
-            }
-        }
-    },
-    {
-        "name": "consultar_horarios",
-        "description": "Consulta horários disponíveis na agenda.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "data": {"type": "string", "description": "Data no formato YYYY-MM-DD"}
-            },
-            "required": ["data"]
-        }
-    },
-    {
-        "name": "agendar_consulta",
-        "description": "Realiza o agendamento final de uma consulta.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "start_date": {"type": "string", "description": "Data e hora exata (YYYY-MM-DD HH:mm)"},
-                "patient_id": {"type": "integer", "description": "ID do paciente"},
-                "telefone": {"type": "string", "description": "Telefone de contato"}
-            },
-            "required": ["start_date", "patient_id", "telefone"]
-        }
-    }
-]
 
 # --- SERVIDOR MCP ---
 mcp = FastMCP("amigo-scheduler")
@@ -104,7 +62,7 @@ async def consultar_horarios(data: str) -> str:
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Realiza o agendamento."""
+    """Realiza o agendamento de uma consulta."""
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     body = {
         "insurance_id": CONFIG["INSURANCE_ID"],
@@ -121,47 +79,45 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(f"{AMIGO_API_URL}/attendances", json=body, headers=headers)
-            return f"Sucesso: {str(response.json())}"
+            return f"Agendamento realizado: {str(response.json())}"
         except Exception as e:
             return f"Erro: {str(e)}"
 
-# --- ROTEAMENTO INTELIGENTE ---
+# --- MONTAGEM DO SERVIDOR COM CORS ---
 
+# 1. Pegamos o app MCP (com os parenteses corretos!)
 mcp_asgi_app = mcp.sse_app()
 
-async def handle_post_compatibility(request: Request):
-    """Redireciona POSTs perdidos para /messages"""
+# 2. Configuração de CORS (Permite que a Double X acesse seu servidor sem bloqueio)
+middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Libera geral para a Double X conseguir ler
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+]
+
+# 3. Handler para redirecionar POSTs perdidos no /sse para /messages
+async def handle_compatibility_post(request: Request):
     scope = request.scope
-    scope["path"] = "/messages"
+    scope["path"] = "/messages"  # Redireciona para o endpoint correto
     await mcp_asgi_app(scope, request.receive, request.send)
 
-async def handle_get_tools(request: Request):
-    """Entrega o cardápio (lista de ferramentas) via GET"""
-    return JSONResponse({
-        "tools": TOOLS_SCHEMA,
-        "_meta": "Manually exposed for compatibility"
-    })
-
-# Lista de rotas para interceptar
-routes = []
-
-# 1. Rotas de POST (Compatibilidade JSON-RPC)
-post_paths = ["/sse", "/tools/list", "/api/tools/list"]
-for path in post_paths:
-    routes.append(Route(path, handle_post_compatibility, methods=["POST"]))
-
-# 2. Rotas de GET (Descoberta REST)
-get_paths = ["/tools", "/api/tools", "/tools/list"]
-for path in get_paths:
-    routes.append(Route(path, handle_get_tools, methods=["GET"]))
-
-# 3. Health Check
+# 4. Rota de Health Check
 async def health_check(request):
-    return JSONResponse({"status": "online", "tools": len(TOOLS_SCHEMA)})
-routes.append(Route("/health", health_check))
-routes.append(Route("/", health_check))
+    return JSONResponse({"status": "online", "mcp_mode": "active"})
 
-# 4. Mount final para o app oficial
-routes.append(Mount("/", app=mcp_asgi_app))
+# 5. Definição das Rotas
+routes = [
+    Route("/health", health_check),
+    Route("/", health_check),
+    # Captura o POST no /sse (que a Double X faz errado) e corrige
+    Route("/sse", handle_compatibility_post, methods=["POST"]),
+    # Monta o servidor oficial do MCP na raiz (para lidar com o GET /sse e o POST /messages)
+    Mount("/", app=mcp_asgi_app)
+]
 
-starlette_app = Starlette(routes=routes)
+# 6. Criação do App Final
+starlette_app = Starlette(routes=routes, middleware=middleware)
