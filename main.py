@@ -5,11 +5,9 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import Route, Mount
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 
-# --- CONFIGURAÇÕES E IDs ---
-# Usamos os valores das suas imagens como padrão (fallback)
+# --- CONFIGURAÇÕES ---
 def get_config(key, default):
     val = os.getenv(key)
     if val and val.strip():
@@ -27,7 +25,7 @@ CONFIG = {
     "INSURANCE_ID": int(get_config("INSURANCE_ID", 1))
 }
 
-# --- SERVIDOR MCP ---
+# --- SERVIDOR MCP (Ferramentas) ---
 mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
@@ -83,41 +81,56 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro: {str(e)}"
 
-# --- MONTAGEM DO SERVIDOR COM CORS ---
+# --- MIDDLEWARE (O Porteiro Mágico) ---
 
-# 1. Pegamos o app MCP (com os parenteses corretos!)
+class DoubleXRewriterMiddleware:
+    """
+    Intercepta as chamadas 'erradas' do Double X e as corrige antes
+    que o servidor perceba o erro.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            method = scope.get("method", "GET")
+            
+            # SE DETECTAR O ERRO DO DOUBLE X:
+            # (Tentativa de POST em /sse ou qualquer rota de tools)
+            if method == "POST" and (path == "/sse" or "tools" in path):
+                print(f"DEBUG: Corrigindo rota {path} -> /messages para o Double X")
+                scope["path"] = "/messages" # A mágica acontece aqui!
+        
+        await self.app(scope, receive, send)
+
+# --- MONTAGEM DO APP FINAL ---
+
+# 1. Pegamos o app MCP
 mcp_asgi_app = mcp.sse_app()
 
-# 2. Configuração de CORS (Permite que a Double X acesse seu servidor sem bloqueio)
-middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=["*"],  # Libera geral para a Double X conseguir ler
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-]
-
-# 3. Handler para redirecionar POSTs perdidos no /sse para /messages
-async def handle_compatibility_post(request: Request):
-    scope = request.scope
-    scope["path"] = "/messages"  # Redireciona para o endpoint correto
-    await mcp_asgi_app(scope, request.receive, request.send)
-
-# 4. Rota de Health Check
+# 2. Rota de Health Check
 async def health_check(request):
     return JSONResponse({"status": "online", "mcp_mode": "active"})
 
-# 5. Definição das Rotas
 routes = [
     Route("/health", health_check),
-    Route("/", health_check),
-    # Captura o POST no /sse (que a Double X faz errado) e corrige
-    Route("/sse", handle_compatibility_post, methods=["POST"]),
-    # Monta o servidor oficial do MCP na raiz (para lidar com o GET /sse e o POST /messages)
+    # Montamos o MCP na raiz. O Middleware acima vai garantir que os pedidos cheguem certos.
     Mount("/", app=mcp_asgi_app)
 ]
 
-# 6. Criação do App Final
+# 3. Definição da Pilha de Middlewares (A ordem importa!)
+# O CORS vem primeiro (libera a entrada), depois o Rewriter (corrige o endereço)
+middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    ),
+    Middleware(DoubleXRewriterMiddleware)
+]
+
+# 4. App Final
 starlette_app = Starlette(routes=routes, middleware=middleware)
