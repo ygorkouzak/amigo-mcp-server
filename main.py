@@ -30,20 +30,41 @@ mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
-    """Busca um paciente pelo nome ou CPF."""
+    """
+    Busca o cadastro de um paciente na base de dados.
+    
+    É obrigatório fornecer pelo menos um dos argumentos (nome ou cpf).
+    
+    Args:
+        nome: Nome completo ou parcial do paciente para busca.
+        cpf: CPF do paciente (apenas números ou com pontuação).
+    """
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
-    params = {"name": nome, "cpf": cpf}
+    # Pequena melhoria: garantir que cpf ou nome existam
+    if not nome and not cpf:
+        return "Erro: Você precisa fornecer um Nome ou um CPF para buscar."
+        
+    params = {}
+    if nome: params['name'] = nome
+    if cpf: params['cpf'] = cpf
+
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{AMIGO_API_URL}/patients", params=params, headers=headers)
-            if response.status_code == 401: return "Erro: Token inválido."
+            if response.status_code == 401: return "Erro: Token de API inválido ou expirado."
             return str(response.json())
         except Exception as e:
-            return f"Erro: {str(e)}"
+            return f"Erro na conexão: {str(e)}"
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
-    """Consulta horários disponíveis (YYYY-MM-DD)."""
+    """
+    Verifica a disponibilidade de agenda para uma data específica.
+    Use esta ferramenta antes de tentar agendar qualquer consulta.
+    
+    Args:
+        data: A data desejada no formato ISO 'YYYY-MM-DD' (Ex: '2025-12-25').
+    """
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {
         "date": data,
@@ -54,13 +75,23 @@ async def consultar_horarios(data: str) -> str:
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{AMIGO_API_URL}/calendar", params=params, headers=headers)
+            # Dica: Se a resposta for vazia, a IA saberá que não tem horário
             return str(response.json())
         except Exception as e:
-            return f"Erro: {str(e)}"
+            return f"Erro ao consultar agenda: {str(e)}"
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Realiza o agendamento de uma consulta."""
+    """
+    Finaliza e confirma o agendamento de uma consulta no sistema.
+    
+    ATENÇÃO: Só use esta ferramenta após o usuário confirmar explicitamente o horário.
+    
+    Args:
+        start_date: A data e hora exata do início da consulta. Formato esperado: 'YYYY-MM-DD HH:MM:SS' (ou ISO 8601).
+        patient_id: O ID numérico do paciente (obtido via buscar_paciente).
+        telefone: O telefone de contato para este agendamento.
+    """
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     body = {
         "insurance_id": CONFIG["INSURANCE_ID"],
@@ -77,32 +108,12 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(f"{AMIGO_API_URL}/attendances", json=body, headers=headers)
-            return f"Agendamento realizado: {str(response.json())}"
+            if response.status_code in [200, 201]:
+                return f"Agendamento realizado com sucesso! Detalhes: {str(response.json())}"
+            else:
+                return f"Falha ao agendar. Status: {response.status_code}. Resposta: {response.text}"
         except Exception as e:
-            return f"Erro: {str(e)}"
-
-# --- MIDDLEWARE (O Porteiro Mágico) ---
-
-class DoubleXRewriterMiddleware:
-    """
-    Intercepta as chamadas 'erradas' do Double X e as corrige antes
-    que o servidor perceba o erro.
-    """
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            path = scope.get("path", "")
-            method = scope.get("method", "GET")
-            
-            # SE DETECTAR O ERRO DO DOUBLE X:
-            # (Tentativa de POST em /sse ou qualquer rota de tools)
-            if method == "POST" and (path == "/sse" or "tools" in path):
-                print(f"DEBUG: Corrigindo rota {path} -> /messages para o Double X")
-                scope["path"] = "/messages" # A mágica acontece aqui!
-        
-        await self.app(scope, receive, send)
+            return f"Erro crítico ao agendar: {str(e)}"
 
 # --- MONTAGEM DO APP FINAL ---
 
