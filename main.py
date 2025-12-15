@@ -4,6 +4,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware  # <--- IMPORTANTE
 from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse
 
@@ -25,25 +26,21 @@ CONFIG = {
     "INSURANCE_ID": int(get_config("INSURANCE_ID", 1))
 }
 
-# --- 2. SERVIDOR MCP (Ferramentas Otimizadas) ---
+# --- 2. SERVIDOR MCP ---
 mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     """
     Busca o cadastro de um paciente na base de dados.
-    
     É obrigatório fornecer pelo menos um dos argumentos (nome ou cpf).
-    
     Args:
-        nome: Nome completo ou parcial do paciente para busca.
+        nome: Nome completo ou parcial do paciente.
         cpf: CPF do paciente (apenas números ou com pontuação).
     """
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
-    
     if not nome and not cpf:
-        return "Erro: Você precisa fornecer um Nome ou um CPF para buscar."
-        
+        return "Erro: Forneça Nome ou CPF."
     params = {}
     if nome: params['name'] = nome
     if cpf: params['cpf'] = cpf
@@ -51,19 +48,17 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{AMIGO_API_URL}/patients", params=params, headers=headers)
-            if response.status_code == 401: return "Erro: Token de API inválido ou expirado."
+            if response.status_code == 401: return "Erro: Token inválido."
             return str(response.json())
         except Exception as e:
-            return f"Erro na conexão: {str(e)}"
+            return f"Erro: {str(e)}"
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
     """
-    Verifica a disponibilidade de agenda para uma data específica.
-    Use esta ferramenta antes de tentar agendar qualquer consulta.
-    
+    Verifica a disponibilidade de agenda (YYYY-MM-DD).
     Args:
-        data: A data desejada no formato ISO 'YYYY-MM-DD' (Ex: '2025-12-25').
+        data: Data no formato ISO 'YYYY-MM-DD'.
     """
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {
@@ -77,19 +72,16 @@ async def consultar_horarios(data: str) -> str:
             response = await client.get(f"{AMIGO_API_URL}/calendar", params=params, headers=headers)
             return str(response.json())
         except Exception as e:
-            return f"Erro ao consultar agenda: {str(e)}"
+            return f"Erro: {str(e)}"
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
     """
-    Finaliza e confirma o agendamento de uma consulta no sistema.
-    
-    ATENÇÃO: Só use esta ferramenta após o usuário confirmar explicitamente o horário.
-    
+    Finaliza o agendamento.
     Args:
-        start_date: A data e hora exata do início da consulta. Formato esperado: 'YYYY-MM-DD HH:MM:SS' (ou ISO 8601).
-        patient_id: O ID numérico do paciente (obtido via buscar_paciente).
-        telefone: O telefone de contato para este agendamento.
+        start_date: Data/hora 'YYYY-MM-DD HH:MM:SS'.
+        patient_id: ID do paciente.
+        telefone: Telefone de contato.
     """
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     body = {
@@ -107,21 +99,13 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(f"{AMIGO_API_URL}/attendances", json=body, headers=headers)
-            if response.status_code in [200, 201]:
-                return f"Agendamento realizado com sucesso! Detalhes: {str(response.json())}"
-            else:
-                return f"Falha ao agendar. Status: {response.status_code}. Resposta: {response.text}"
+            return f"Status: {response.status_code}. Resp: {str(response.json())}"
         except Exception as e:
-            return f"Erro crítico ao agendar: {str(e)}"
+            return f"Erro: {str(e)}"
 
-# --- 3. MIDDLEWARE (Definição da Classe) ---
-# IMPORTANTE: Esta classe precisa estar definida ANTES de ser usada na lista 'middleware' abaixo.
+# --- 3. MIDDLEWARE DE CORREÇÃO ---
 
 class DoubleXRewriterMiddleware:
-    """
-    Intercepta as chamadas 'erradas' do Double X e as corrige antes
-    que o servidor perceba o erro.
-    """
     def __init__(self, app):
         self.app = app
 
@@ -130,29 +114,36 @@ class DoubleXRewriterMiddleware:
             path = scope.get("path", "")
             method = scope.get("method", "GET")
             
-            # SE DETECTAR O ERRO DO DOUBLE X:
-            # (Tentativa de POST em /sse ou qualquer rota de tools)
-            if method == "POST" and (path == "/sse" or "tools" in path):
-                print(f"DEBUG: Corrigindo rota {path} -> /messages para o Double X")
-                scope["path"] = "/messages" # A mágica acontece aqui!
+            # LOG DEBUG PARA O RENDER
+            print(f"👀 ROTA: {method} {path}")
+
+            # CORREÇÃO CRÍTICA:
+            # 1. Detecta POST errado em /sse ou /tools
+            # 2. Redireciona para /messages/ (COM A BARRA NO FINAL para evitar erro 307)
+            if method == "POST" and (path == "/sse" or "tools" in path or path == "/messages"):
+                print(f"✨ REWRITING: {path} -> /messages/")
+                scope["path"] = "/messages/" 
         
         await self.app(scope, receive, send)
 
-# --- 4. MONTAGEM DO APP FINAL ---
+# --- 4. APP FINAL ---
 
-# Pegamos o app MCP e o preparamos
 mcp_asgi_app = mcp.sse_app()
 
 async def health_check(request):
-    return JSONResponse({"status": "online", "mcp_mode": "active"})
+    return JSONResponse({"status": "online"})
 
 routes = [
     Route("/health", health_check),
     Mount("/", app=mcp_asgi_app)
 ]
 
-# Definição da Pilha de Middlewares
+# PILHA DE MIDDLEWARE (A ORDEM IMPORTA MUITO)
 middleware = [
+    # 1. Permite que o Render acesse (Corrige o "Invalid Host Header")
+    Middleware(TrustedHostMiddleware, allowed_hosts=["*"]),
+    
+    # 2. Permite CORS (Corrige bloqueios de navegador/cross-origin)
     Middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -160,9 +151,9 @@ middleware = [
         allow_methods=["*"],
         allow_headers=["*"],
     ),
-    # Agora o Python já conhece a classe, pois ela foi definida acima no passo 3
+    
+    # 3. Corrige as rotas do Double X
     Middleware(DoubleXRewriterMiddleware)
 ]
 
-# App Final para o Uvicorn rodar
 starlette_app = Starlette(routes=routes, middleware=middleware)
