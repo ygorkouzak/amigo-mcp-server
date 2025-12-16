@@ -7,23 +7,21 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse
+from dotenv import load_dotenv
+
+# Carrega variáveis do arquivo .env
+load_dotenv()
 
 # --- 1. CONFIGURAÇÕES ---
-def get_config(key, default):
-    val = os.getenv(key)
-    if val and val.strip():
-        return val
-    return default
-
 AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
 API_TOKEN = os.getenv("AMIGO_API_TOKEN")
 
 CONFIG = {
-    "PLACE_ID": int(get_config("PLACE_ID", 6955)),
-    "EVENT_ID": int(get_config("EVENT_ID", 526436)),
-    "ACCOUNT_ID": int(get_config("ACCOUNT_ID", 74698)),
-    "USER_ID": int(get_config("USER_ID", 28904)),
-    "INSURANCE_ID": int(get_config("INSURANCE_ID", 1))
+    "PLACE_ID": int(os.getenv("PLACE_ID", 6955)),
+    "EVENT_ID": int(os.getenv("EVENT_ID", 526436)),
+    "ACCOUNT_ID": int(os.getenv("ACCOUNT_ID", 74698)),
+    "USER_ID": int(os.getenv("USER_ID", 28904)),
+    "INSURANCE_ID": int(os.getenv("INSURANCE_ID", 1))
 }
 
 # --- 2. SERVIDOR MCP ---
@@ -31,7 +29,8 @@ mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
-    """Busca o cadastro de um paciente. Nome ou CPF obrigatórios."""
+    """Busca paciente. Nome ou CPF obrigatórios."""
+    if not API_TOKEN: return "Erro: Token não configurado no .env"
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     if not nome and not cpf: return "Erro: Forneça Nome ou CPF."
     params = {}
@@ -40,7 +39,6 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{AMIGO_API_URL}/patients", params=params, headers=headers)
-            if response.status_code == 401: return "Erro: Token inválido."
             return str(response.json())
         except Exception as e: return f"Erro: {str(e)}"
 
@@ -57,7 +55,7 @@ async def consultar_horarios(data: str) -> str:
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Finaliza o agendamento (start_date: YYYY-MM-DD HH:MM:SS)."""
+    """Agendar consulta (start_date: YYYY-MM-DD HH:MM:SS)."""
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     body = {
         "insurance_id": CONFIG["INSURANCE_ID"], "event_id": CONFIG["EVENT_ID"], "place_id": CONFIG["PLACE_ID"],
@@ -70,37 +68,29 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
             return f"Status: {response.status_code}. Resp: {str(response.json())}"
         except Exception as e: return f"Erro: {str(e)}"
 
-# --- 3. MIDDLEWARE DE CORREÇÃO ---
-class DoubleXRewriterMiddleware:
+# --- 3. MIDDLEWARE CORRETOR ---
+class DoubleXFixMiddleware:
     def __init__(self, app): self.app = app
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             path = scope.get("path", "")
             method = scope.get("method", "GET")
-            print(f"👀 ROTA: {method} {path}")
-            # Se for POST em /sse ou /tools ou /messages (sem barra), joga para /messages/
-            if method == "POST" and (path == "/sse" or "tools" in path or path == "/messages"):
-                print(f"✨ REWRITING: {path} -> /messages/")
+            
+            # IMPRIME NO TERMINAL QUEM ESTÁ CHAMANDO
+            # print(f"👀 ROTA CHAMADA: {method} {path}")
+
+            if method == "POST" and (path == "/sse" or path == "/messages"):
                 scope["path"] = "/messages/" 
         await self.app(scope, receive, send)
 
 # --- 4. APP FINAL ---
-mcp_asgi_app = mcp.sse_app()
+mcp_asgi = mcp.sse_app()
+async def health_check(request): return JSONResponse({"status": "online"})
 
-async def health_check(request):
-    """Responde tanto no /health quanto na raiz / para o Render ficar feliz"""
-    return JSONResponse({"status": "online", "message": "Servidor MCP Amigo Ativo 🚀"})
-
-routes = [
-    Route("/health", health_check),
-    Route("/", health_check), # <--- ADICIONEI ISSO: A Raiz agora responde 200 OK!
-    Mount("/", app=mcp_asgi_app)
-]
-
+routes = [Route("/", health_check), Route("/health", health_check), Mount("/", app=mcp_asgi)]
 middleware = [
     Middleware(TrustedHostMiddleware, allowed_hosts=["*"]),
-    Middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]),
-    Middleware(DoubleXRewriterMiddleware)
+    Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
+    Middleware(DoubleXFixMiddleware)
 ]
-
 starlette_app = Starlette(routes=routes, middleware=middleware)
