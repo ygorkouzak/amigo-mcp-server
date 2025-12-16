@@ -4,7 +4,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
+# TrustedHostMiddleware REMOVIDO para evitar erro de Host Header
 from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse
 from dotenv import load_dotenv
@@ -83,7 +83,6 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         patient_id: ID do paciente.
         telefone: Telefone de contato.
     """
-    # A LINHA DO ERRO ERA AQUI ABAIXO (AGORA ESTÁ CORRIGIDA)
     if not API_TOKEN: return "Erro: AMIGO_API_TOKEN não configurado."
 
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
@@ -135,8 +134,8 @@ routes = [
     Mount("/", app=mcp_asgi_app)
 ]
 
+# LISTA DE MIDDLEWARES ATUALIZADA (SEM O TRUSTED HOST)
 middleware = [
-    Middleware(TrustedHostMiddleware, allowed_hosts=["*"]),
     Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
     Middleware(DoubleXFixMiddleware)
 ]
