@@ -141,54 +141,34 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
 
 # --- ENDPOINT DE HEALTH CHECK ---
 async def health_check(request):
-    """Endpoint para verificar se o servidor está online"""
+    """Endpoint simples para verificar se o servidor está online"""
     return JSONResponse({
         "status": "online",
         "server": "amigo-mcp-server",
         "mode": "MCP Protocol",
-        "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"],
-        "endpoints": {
-            "health": "/health",
-            "sse": "/sse",
-            "messages": "/messages/"
-        },
-        "instructions": "Connect MCP client to: https://amigo-mcp-server.onrender.com/sse"
+        "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"]
     })
 
-# --- CONFIGURAÇÃO FINAL E MIDDLEWARES ---
-
-# Definição do Middleware para Corrigir o Host Header
-class FixHostHeaderMiddleware:
-    def __init__(self, app):
-        self.app = app
-        
-    async def __call__(self, scope, receive, send):
-        if scope['type'] == 'http':
-            # Cria uma cópia mutável dos headers
-            headers = dict(scope['headers'])
-            # Força o Host para localhost para passar na validação de segurança do MCP
-            headers[b'host'] = b'localhost'
-            # Atualiza o scope com o novo header
-            scope['headers'] = list(headers.items())
-        await self.app(scope, receive, send)
-
-# Obtém o app SSE do MCP
+# --- CONFIGURAÇÃO CORRETA DO STARLETTE ---
+# Primeiro criamos o app SSE do MCP
 mcp_sse_app = mcp.sse_app()
 
-# 1. Adiciona o Middleware de correção de Host (Deve vir antes do CORS)
-mcp_sse_app.add_middleware(FixHostHeaderMiddleware)
+# Rotas: /health separado, e /sse para o MCP
+routes = [
+    Route("/health", health_check, methods=["GET"]),
+    Mount("/sse", app=mcp_sse_app),  # 🔧 CORREÇÃO: MCP em /sse
+]
 
-# 2. Adiciona middleware CORS
-mcp_sse_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
-)
+# Middleware CORS para permitir conexões externas
+middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=True,
+    ),
+]
 
-# Adiciona a rota de health check
-mcp_sse_app.routes.insert(0, Route("/health", health_check, methods=["GET"]))
-
-# Exporta o app
-starlette_app = mcp_sse_app
+# App Starlette final
+starlette_app = Starlette(routes=routes, middleware=middleware)
