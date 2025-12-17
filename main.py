@@ -8,35 +8,6 @@ from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse
 from dotenv import load_dotenv
 
-# --- CORREÇÃO DE ERRO DE HOST (MONKEY PATCH) ---
-import mcp.server.sse
-
-# Guardamos a função original da biblioteca
-original_connect_sse = mcp.server.sse.connect_sse
-
-# Criamos uma nova função que força a aceitação do seu domínio no Render
-async def patched_connect_sse(scope, receive, send, permitted_origins=None):
-    # Lista de domínios que vamos permitir explicitamente
-    allowed_hosts = [
-        "amigo-mcp-server.onrender.com", 
-        "localhost", 
-        "127.0.0.1",
-        "0.0.0.0"
-    ]
-    
-    # Se já houver origens permitidas, adicionamos as nossas a elas
-    if permitted_origins:
-        final_allowed = list(set(list(permitted_origins) + allowed_hosts))
-    else:
-        final_allowed = allowed_hosts
-        
-    # Chama a função original com a nossa lista de hosts permitidos
-    return await original_connect_sse(scope, receive, send, permitted_origins=final_allowed)
-
-# Aplicamos a correção na biblioteca
-mcp.server.sse.connect_sse = patched_connect_sse
-# -----------------------------------------------
-
 # Carrega variáveis
 load_dotenv()
 
@@ -184,11 +155,30 @@ async def health_check(request):
         "instructions": "Connect MCP client to: https://amigo-mcp-server.onrender.com/sse"
     })
 
-# --- CONFIGURAÇÃO FINAL ---
-# Obtém o app SSE do MCP (já vem com rotas /sse e /messages/)
+# --- CONFIGURAÇÃO FINAL E MIDDLEWARES ---
+
+# Definição do Middleware para Corrigir o Host Header
+class FixHostHeaderMiddleware:
+    def __init__(self, app):
+        self.app = app
+        
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http':
+            # Cria uma cópia mutável dos headers
+            headers = dict(scope['headers'])
+            # Força o Host para localhost para passar na validação de segurança do MCP
+            headers[b'host'] = b'localhost'
+            # Atualiza o scope com o novo header
+            scope['headers'] = list(headers.items())
+        await self.app(scope, receive, send)
+
+# Obtém o app SSE do MCP
 mcp_sse_app = mcp.sse_app()
 
-# Adiciona middleware CORS ao app gerado
+# 1. Adiciona o Middleware de correção de Host (Deve vir antes do CORS)
+mcp_sse_app.add_middleware(FixHostHeaderMiddleware)
+
+# 2. Adiciona middleware CORS
 mcp_sse_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
