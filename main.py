@@ -27,7 +27,7 @@ CONFIG = {
     "INSURANCE_ID": int(os.getenv("INSURANCE_ID", 1))
 }
 
-# Rotas que o Double X tenta acessar incorretamente e precisamos corrigir
+# Rotas de compatibilidade para o Double X
 COMPATIBILITY_ROUTES = [
     "/tools", "/tools/list", 
     "/api/tools", "/api/tools/list", 
@@ -63,10 +63,8 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
             )
             resp.raise_for_status()
             return str(resp.json())
-        except httpx.HTTPStatusError as e:
-            return f"Erro de API ({e.response.status_code}): {e.response.text}"
         except Exception as e:
-            return f"Erro de conexão: {str(e)}"
+            return f"Erro ao buscar paciente: {str(e)}"
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
@@ -119,17 +117,12 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro ao agendar: {str(e)}"
 
-# --- HANDLERS ESPECIAIS (ADAPTERS) ---
+# --- HANDLERS ESPECIAIS ---
 
 async def health_check(request):
-    """Monitoramento do Render."""
     return JSONResponse({"status": "online", "mode": "Production"})
 
 async def handle_tools_discovery(request):
-    """
-    Entrega o JSON manual para o Double X que não suporta descoberta via SSE.
-    IMPORTANTE: Se alterar os argumentos das tools acima, atualize aqui também.
-    """
     tools_schema = {
         "tools": [
             {
@@ -155,7 +148,7 @@ async def handle_tools_discovery(request):
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "start_date": {"type": "string", "description": "ISO Date"},
+                        "start_date": {"type": "string"},
                         "patient_id": {"type": "integer"},
                         "telefone": {"type": "string"}
                     },
@@ -167,11 +160,9 @@ async def handle_tools_discovery(request):
     return JSONResponse(tools_schema)
 
 async def redirect_to_messages(request):
-    """Corrige erro 405/500 redirecionando POSTs perdidos para o endpoint correto."""
     return RedirectResponse(url="/messages/", status_code=307)
 
 async def handle_root(request):
-    """Trata requisições na raiz para evitar 404."""
     if request.method == "POST":
         return await redirect_to_messages(request)
     return JSONResponse({
@@ -187,34 +178,26 @@ class FixHostHeaderMiddleware:
         
     async def __call__(self, scope, receive, send):
         if scope['type'] == 'http':
-            # Força o host para localhost para satisfazer validações internas do MCP
-            # Isso é necessário mesmo removendo o TrustedHostMiddleware do Starlette
             headers = dict(scope['headers'])
             headers[b'host'] = b'localhost'
             scope['headers'] = list(headers.items())
         await self.app(scope, receive, send)
 
-# --- MONTAGEM DO APLICATIVO (CIRURGIA NO MIDDLEWARE) ---
+# --- MONTAGEM DO APLICATIVO (CORREÇÃO DE NOME: 'app') ---
 
-# 1. Gera o app base do MCP
-starlette_app = mcp.sse_app()
+# 1. Gera o app base e atribui à variável 'app' (antes era starlette_app)
+app = mcp.sse_app()
 
 # 2. REMOÇÃO DO MIDDLEWARE RESTRITIVO
-# O FastMCP insere um TrustedHostMiddleware que bloqueia domínios externos.
-# Aqui nós filtramos a lista de middlewares e removemos ele.
-if hasattr(starlette_app, 'user_middleware'):
-    starlette_app.user_middleware = [
-        m for m in starlette_app.user_middleware 
+if hasattr(app, 'user_middleware'):
+    app.user_middleware = [
+        m for m in app.user_middleware 
         if m.cls != TrustedHostMiddleware
     ]
-    # Reconstrói a stack de middleware do Starlette sem a trava de segurança
-    starlette_app.build_middleware_stack()
+    app.build_middleware_stack()
 
 # 3. ADIÇÃO DOS NOSSOS MIDDLEWARES
-# A ordem importa: O último adicionado é o primeiro a rodar na requisição.
-
-# Permite conexões externas (CORS)
-starlette_app.add_middleware(
+app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
@@ -222,15 +205,13 @@ starlette_app.add_middleware(
     allow_credentials=True,
 )
 
-# Ajusta o Host header para 'localhost' (para o MCP não reclamar internamente)
-starlette_app.add_middleware(FixHostHeaderMiddleware)
+app.add_middleware(FixHostHeaderMiddleware)
 
 # --- REGISTRO DE ROTAS ---
 
-starlette_app.add_route("/health", health_check, methods=["GET"])
-starlette_app.add_route("/", handle_root, methods=["GET", "POST", "HEAD"])
-starlette_app.add_route("/sse", redirect_to_messages, methods=["POST"])
+app.add_route("/health", health_check, methods=["GET"])
+app.add_route("/", handle_root, methods=["GET", "POST", "HEAD"])
+app.add_route("/sse", redirect_to_messages, methods=["POST"])
 
-# Registra todas as rotas de compatibilidade para o Double X
 for path in COMPATIBILITY_ROUTES:
-    starlette_app.add_route(path, handle_tools_discovery, methods=["GET", "POST"])
+    app.add_route(path, handle_tools_discovery, methods=["GET", "POST"])
