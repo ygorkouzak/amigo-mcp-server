@@ -2,8 +2,7 @@ import os
 import httpx
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse, RedirectResponse
-from starlette.routing import Route
+from starlette.responses import JSONResponse
 from dotenv import load_dotenv
 
 # Carrega variáveis
@@ -26,12 +25,7 @@ mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
-    """Busca paciente por nome ou CPF na base de dados da Amigo.
-    
-    Args:
-        nome: Nome completo ou parcial do paciente
-        cpf: CPF do paciente (apenas números)
-    """
+    """Busca paciente por nome ou CPF na base de dados da Amigo."""
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -61,11 +55,7 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
-    """Consulta horários disponíveis para agendamento em uma data específica.
-    
-    Args:
-        data: Data no formato YYYY-MM-DD (ex: 2024-12-20)
-    """
+    """Consulta horários disponíveis para agendamento em uma data específica."""
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -92,13 +82,7 @@ async def consultar_horarios(data: str) -> str:
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Realiza o agendamento de uma consulta para o paciente.
-    
-    Args:
-        start_date: Data e hora do agendamento no formato ISO
-        patient_id: ID do paciente obtido pela busca
-        telefone: Telefone de contato do paciente
-    """
+    """Realiza o agendamento de uma consulta para o paciente."""
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -197,10 +181,39 @@ starlette_app.add_middleware(
     allow_credentials=True,
 )
 
+# --- LÓGICA DE REDIRECIONAMENTO DE MENSAGENS ---
+# Esta função pega requisições POST mal direcionadas e manda para o lugar certo (/messages/)
+async def forward_to_messages(request):
+    for route in starlette_app.routes:
+        if hasattr(route, "path") and route.path == "/messages/":
+            return await route.endpoint(request)
+    return JSONResponse({"error": "Handler de mensagens não encontrado"}, status_code=500)
+
+# --- HANDLER DA RAIZ (SOLUÇÃO DOS SEUS LOGS DE ERRO) ---
+async def handle_root(request):
+    # Se for POST, assumimos que é o Double X tentando falar com o bot
+    if request.method == "POST":
+        return await forward_to_messages(request)
+    
+    # Se for GET ou HEAD, retornamos status online (para navegador e render health check)
+    return JSONResponse({
+        "status": "online",
+        "message": "Amigo MCP Server Running",
+        "docs": "/tools/list"
+    })
+
+# --- REGISTRO DE ROTAS ---
+
 # 1. Rota Health Check
 starlette_app.add_route("/health", health_check, methods=["GET"])
 
-# 2. Rotas de Compatibilidade de Tools (Resolve erro 404)
+# 2. Rota Raiz (Cobre os erros GET /, POST / e HEAD /)
+starlette_app.add_route("/", handle_root, methods=["GET", "POST", "HEAD"])
+
+# 3. Rota SSE mal direcionada (Cobre erro POST /sse)
+starlette_app.add_route("/sse", forward_to_messages, methods=["POST"])
+
+# 4. Rotas de Compatibilidade de Tools (Cobre erros 404 de discovery)
 routes_to_fix = [
     "/tools", "/tools/list", 
     "/api/tools", "/api/tools/list", 
@@ -211,15 +224,3 @@ routes_to_fix = [
 ]
 for path in routes_to_fix:
     starlette_app.add_route(path, handle_tools_discovery, methods=["GET", "POST"])
-
-# 3. CORREÇÃO FINAL (Resolve erro 405): Redireciona POST /sse para /messages/
-# Se o Double X tentar enviar mensagem na rota errada, nós redirecionamos.
-async def forward_to_messages(request):
-    # Encontramos o handler oficial de mensagens dentro do app do MCP
-    for route in starlette_app.routes:
-        if hasattr(route, "path") and route.path == "/messages/":
-             # Repassamos a requisição para o handler correto
-            return await route.endpoint(request)
-    return JSONResponse({"error": "Handler de mensagens não encontrado"}, status_code=500)
-
-starlette_app.add_route("/sse", forward_to_messages, methods=["POST"])
