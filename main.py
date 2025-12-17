@@ -1,110 +1,70 @@
 import os
-import httpx
-from dotenv import load_dotenv
-
-from mcp.server.fastmcp import FastMCP
-from mcp.server.sse import SSEServerTransport
-
+import json
+import asyncio
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse
+from starlette.responses import StreamingResponse, JSONResponse
 from starlette.routing import Route
+from mcp.server.fastmcp import FastMCP
 
-# =====================
-# ENV
-# =====================
-load_dotenv()
+# ======================
+# MCP CONFIG
+# ======================
 
-AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
-API_TOKEN = os.getenv("AMIGO_API_TOKEN")
-
-CONFIG = {
-    "PLACE_ID": int(os.getenv("PLACE_ID", 6955)),
-    "EVENT_ID": int(os.getenv("EVENT_ID", 526436)),
-    "ACCOUNT_ID": int(os.getenv("ACCOUNT_ID", 74698)),
-    "USER_ID": int(os.getenv("USER_ID", 28904)),
-    "INSURANCE_ID": int(os.getenv("INSURANCE_ID", 1)),
-}
-
-# =====================
-# MCP
-# =====================
-mcp = FastMCP("amigo-scheduler")
-
-# =====================
-# TOOLS
-# =====================
-@mcp.tool()
-async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
-    headers = {"Authorization": f"Bearer {API_TOKEN}"}
-    params = {}
-
-    if nome:
-        params["name"] = nome
-    if cpf:
-        params["cpf"] = cpf
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{AMIGO_API_URL}/patients", params=params, headers=headers)
-        r.raise_for_status()
-        return r.text
-
+mcp = FastMCP(name="amigo-scheduler")
 
 @mcp.tool()
-async def consultar_horarios(data: str) -> str:
-    headers = {"Authorization": f"Bearer {API_TOKEN}"}
-    params = {
-        "date": data,
-        "event_id": CONFIG["EVENT_ID"],
-        "place_id": CONFIG["PLACE_ID"],
-        "insurance_id": CONFIG["INSURANCE_ID"],
-    }
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{AMIGO_API_URL}/calendar", params=params, headers=headers)
-        r.raise_for_status()
-        return r.text
-
+def ping() -> str:
+    return "pong"
 
 @mcp.tool()
-async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    headers = {"Authorization": f"Bearer {API_TOKEN}"}
-    payload = {
-        "insurance_id": CONFIG["INSURANCE_ID"],
-        "event_id": CONFIG["EVENT_ID"],
-        "place_id": CONFIG["PLACE_ID"],
-        "start_date": start_date,
-        "patient_id": patient_id,
-        "account_id": CONFIG["ACCOUNT_ID"],
-        "user_id": CONFIG["USER_ID"],
-        "chat_id": "doublex",
-        "scheduler_phone": telefone,
-        "is_dependent_schedule": False,
-    }
+def schedule_task(task: str) -> str:
+    return f"Tarefa '{task}' agendada com sucesso"
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(f"{AMIGO_API_URL}/attendances", json=payload, headers=headers)
-        r.raise_for_status()
-        return r.text
+# ======================
+# SSE HANDLER
+# ======================
 
+async def sse_endpoint(request):
+    async def event_generator():
+        # evento inicial (handshake)
+        yield "event: ready\ndata: MCP conectado\n\n"
 
-# =====================
-# SSE
-# =====================
-transport = SSEServerTransport("/sse")
+        # loop simples (pode evoluir depois)
+        while True:
+            await asyncio.sleep(15)
+            yield "event: heartbeat\ndata: alive\n\n"
 
-async def health(request):
-    return JSONResponse({
-        "status": "online",
-        "server": "amigo-mcp-server",
-        "mode": "MCP SSE",
-        "connect": "/sse"
-    })
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # IMPORTANTE p/ proxy
+        },
+    )
 
-app = Starlette(
-    routes=[
-        Route("/health", health),
-        Route("/sse", transport.handle),
-    ]
-)
+# ======================
+# MCP TOOL INVOCATION
+# ======================
 
-transport.mount(mcp)
+async def call_tool(request):
+    payload = await request.json()
+
+    result = await mcp.run(
+        payload["tool"],
+        payload.get("arguments", {})
+    )
+
+    return JSONResponse(result)
+
+# ======================
+# STARLETTE APP
+# ======================
+
+routes = [
+    Route("/sse", sse_endpoint, methods=["GET"]),
+    Route("/call", call_tool, methods=["POST"]),
+]
+
+starlette_app = Starlette(routes=routes)
