@@ -27,8 +27,10 @@ CONFIG = {
 # =====================
 mcp = FastMCP(
     name="amigo-scheduler",
-    trusted_origins=["*"],     # ESSENCIAL p/ Render + SSE
+    trusted_origins=["*"],
+    validate_requests=False, 
 )
+
 
 # =====================
 # TOOLS
