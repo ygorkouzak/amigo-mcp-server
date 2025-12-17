@@ -146,29 +146,42 @@ async def health_check(request):
         "status": "online",
         "server": "amigo-mcp-server",
         "mode": "MCP Protocol",
-        "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"]
+        "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"],
+        "endpoint_sse": "https://amigo-mcp-server.onrender.com/sse"
     })
 
-# --- CONFIGURAÇÃO CORRETA DO STARLETTE ---
-# Primeiro criamos o app SSE do MCP
-mcp_sse_app = mcp.sse_app()
+# --- MIDDLEWARE PARA CORRIGIR O HOST HEADER ---
+# Essencial para o Render não dar erro 421 (Invalid Host Header) no MCP
+class FixHostHeaderMiddleware:
+    def __init__(self, app):
+        self.app = app
+        
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http':
+            headers = dict(scope['headers'])
+            # Força o host ser localhost para o MCP aceitar a conexão
+            headers[b'host'] = b'localhost'
+            scope['headers'] = list(headers.items())
+        await self.app(scope, receive, send)
 
-# Rotas: /health separado, e /sse para o MCP
-routes = [
-    Route("/health", health_check, methods=["GET"]),
-    Mount("/sse", app=mcp_sse_app),  # 🔧 CORREÇÃO: MCP em /sse
-]
+# --- CONFIGURAÇÃO FINAL ---
 
-# Middleware CORS para permitir conexões externas
-middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-        allow_credentials=True,
-    ),
-]
+# 1. Obtemos o app Starlette original do MCP (que já tem a rota /sse embutida)
+starlette_app = mcp.sse_app()
 
-# App Starlette final
-starlette_app = Starlette(routes=routes, middleware=middleware)
+# 2. Adicionamos o Middleware de correção de Host PRIMEIRO
+starlette_app.add_middleware(FixHostHeaderMiddleware)
+
+# 3. Adicionamos o Middleware de CORS (para aceitar conexões externas)
+starlette_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
+
+# 4. Inserimos a rota de health check manualmente no app do MCP
+starlette_app.add_route("/health", health_check, methods=["GET"])
+
+# O objeto 'starlette_app' é o que o uvicorn vai rodar
