@@ -1,66 +1,57 @@
 import os
-import sys
 import httpx
+import logging
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import JSONResponse, RedirectResponse
 from dotenv import load_dotenv
 
-# ============================================
-# SOLUÇÃO DIRETA E SIMPLES
-# ============================================
+# Configuração de Logs
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("amigo-mcp")
 
-# 1. DESATIVA VERIFICAÇÃO DE HOST ANTES DE QUALQUER COISA
-import starlette.middleware.trustedhost
-
-# Substitui o TrustedHostMiddleware por um que não faz nada
-class NoOpTrustedHostMiddleware:
-    def __init__(self, app, allowed_hosts=None, www_redirect=True):
-        self.app = app
-    
-    async def __call__(self, scope, receive, send):
-        await self.app(scope, receive, send)
-
-starlette.middleware.trustedhost.TrustedHostMiddleware = NoOpTrustedHostMiddleware
-
-# 2. Configura variáveis de ambiente
+# Carrega variáveis
 load_dotenv()
 
+# --- CONFIGURAÇÕES ---
 AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
 API_TOKEN = os.getenv("AMIGO_API_TOKEN")
 
 CONFIG = {
-    "PLACE_ID": int(os.getenv("PLACE_ID", "6955")),
-    "EVENT_ID": int(os.getenv("EVENT_ID", "526436")),
-    "ACCOUNT_ID": int(os.getenv("ACCOUNT_ID", "74698")),
-    "USER_ID": int(os.getenv("USER_ID", "28904")),
-    "INSURANCE_ID": int(os.getenv("INSURANCE_ID", "1"))
+    "PLACE_ID": int(os.getenv("PLACE_ID", 6955)),
+    "EVENT_ID": int(os.getenv("EVENT_ID", 526436)),
+    "ACCOUNT_ID": int(os.getenv("ACCOUNT_ID", 74698)),
+    "USER_ID": int(os.getenv("USER_ID", 28904)),
+    "INSURANCE_ID": int(os.getenv("INSURANCE_ID", 1))
 }
 
-# ============================================
-# SERVIDOR MCP SIMPLES
-# ============================================
+# Rotas que o Double X tenta acessar incorretamente e precisamos corrigir
+COMPATIBILITY_ROUTES = [
+    "/tools", "/tools/list", 
+    "/api/tools", "/api/tools/list", 
+    "/mcp/tools/list",
+    "/sse/tools", "/sse/tools/list",
+    "/sse/api/tools", "/sse/api/tools/list",
+    "/sse/mcp/tools/list"
+]
 
-# Cria o servidor MCP da maneira mais simples possível
+# --- SERVIDOR MCP ---
 mcp = FastMCP("amigo-scheduler")
 
-# ============================================
-# FERRAMENTAS (TOOLS)
-# ============================================
+# --- DEFINIÇÃO DAS TOOLS ---
 
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     """Busca paciente por nome ou CPF na base de dados da Amigo."""
     if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN ausente."
+        return "Erro: Configuração incompleta (Token ausente)."
     
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {}
-    
-    if nome:
-        params['name'] = nome
-    if cpf:
-        params['cpf'] = cpf
+    if nome: params['name'] = nome
+    if cpf: params['cpf'] = cpf
     
     if not params:
         return "Erro: Forneça nome ou CPF para buscar."
@@ -68,21 +59,19 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.get(
-                f"{AMIGO_API_URL}/patients",
-                params=params,
-                headers=headers,
-                timeout=30.0
+                f"{AMIGO_API_URL}/patients", params=params, headers=headers, timeout=30.0
             )
             resp.raise_for_status()
             return str(resp.json())
+        except httpx.HTTPStatusError as e:
+            return f"Erro de API ({e.response.status_code}): {e.response.text}"
         except Exception as e:
-            return f"Erro ao buscar paciente: {str(e)}"
+            return f"Erro de conexão: {str(e)}"
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
-    """Consulta horários disponíveis para agendamento em uma data específica."""
-    if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN ausente."
+    """Consulta horários disponíveis (Formato data: YYYY-MM-DD)."""
+    if not API_TOKEN: return "Erro: Token ausente."
     
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {
@@ -95,10 +84,7 @@ async def consultar_horarios(data: str) -> str:
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.get(
-                f"{AMIGO_API_URL}/calendar",
-                params=params,
-                headers=headers,
-                timeout=30.0
+                f"{AMIGO_API_URL}/calendar", params=params, headers=headers, timeout=30.0
             )
             resp.raise_for_status()
             return str(resp.json())
@@ -107,9 +93,8 @@ async def consultar_horarios(data: str) -> str:
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Realiza o agendamento de uma consulta para o paciente."""
-    if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN ausente."
+    """Realiza agendamento (start_date: ISO 8601)."""
+    if not API_TOKEN: return "Erro: Token ausente."
     
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     body = {
@@ -128,138 +113,124 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(
-                f"{AMIGO_API_URL}/attendances",
-                json=body,
-                headers=headers,
-                timeout=30.0
+                f"{AMIGO_API_URL}/attendances", json=body, headers=headers, timeout=30.0
             )
             return f"Status: {resp.status_code}. Resposta: {str(resp.json())}"
         except Exception as e:
-            return f"Erro ao agendar consulta: {str(e)}"
+            return f"Erro ao agendar: {str(e)}"
 
-# ============================================
-# CONFIGURAÇÃO DO APP
-# ============================================
+# --- HANDLERS ESPECIAIS (ADAPTERS) ---
 
-# Obtém o app do MCP
-app = mcp.sse_app
+async def health_check(request):
+    """Monitoramento do Render."""
+    return JSONResponse({"status": "online", "mode": "Production"})
 
-# Adiciona CORS - PERMITE TUDO
-app.add_middleware(
+async def handle_tools_discovery(request):
+    """
+    Entrega o JSON manual para o Double X que não suporta descoberta via SSE.
+    IMPORTANTE: Se alterar os argumentos das tools acima, atualize aqui também.
+    """
+    tools_schema = {
+        "tools": [
+            {
+                "name": "buscar_paciente",
+                "description": "Busca paciente por nome ou CPF.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"nome": {"type": "string"}, "cpf": {"type": "string"}}
+                }
+            },
+            {
+                "name": "consultar_horarios",
+                "description": "Consulta horários disponíveis.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"data": {"type": "string", "description": "YYYY-MM-DD"}},
+                    "required": ["data"]
+                }
+            },
+            {
+                "name": "agendar_consulta",
+                "description": "Agenda consulta.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string", "description": "ISO Date"},
+                        "patient_id": {"type": "integer"},
+                        "telefone": {"type": "string"}
+                    },
+                    "required": ["start_date", "patient_id", "telefone"]
+                }
+            }
+        ]
+    }
+    return JSONResponse(tools_schema)
+
+async def redirect_to_messages(request):
+    """Corrige erro 405/500 redirecionando POSTs perdidos para o endpoint correto."""
+    return RedirectResponse(url="/messages/", status_code=307)
+
+async def handle_root(request):
+    """Trata requisições na raiz para evitar 404."""
+    if request.method == "POST":
+        return await redirect_to_messages(request)
+    return JSONResponse({
+        "status": "online", 
+        "message": "Amigo MCP Server Running",
+        "endpoints": {"sse": "/sse", "messages": "/messages/"}
+    })
+
+# --- MIDDLEWARE DE CORREÇÃO DE HOST ---
+class FixHostHeaderMiddleware:
+    def __init__(self, app):
+        self.app = app
+        
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http':
+            # Força o host para localhost para satisfazer validações internas do MCP
+            # Isso é necessário mesmo removendo o TrustedHostMiddleware do Starlette
+            headers = dict(scope['headers'])
+            headers[b'host'] = b'localhost'
+            scope['headers'] = list(headers.items())
+        await self.app(scope, receive, send)
+
+# --- MONTAGEM DO APLICATIVO (CIRURGIA NO MIDDLEWARE) ---
+
+# 1. Gera o app base do MCP
+starlette_app = mcp.sse_app()
+
+# 2. REMOÇÃO DO MIDDLEWARE RESTRITIVO
+# O FastMCP insere um TrustedHostMiddleware que bloqueia domínios externos.
+# Aqui nós filtramos a lista de middlewares e removemos ele.
+if hasattr(starlette_app, 'user_middleware'):
+    starlette_app.user_middleware = [
+        m for m in starlette_app.user_middleware 
+        if m.cls != TrustedHostMiddleware
+    ]
+    # Reconstrói a stack de middleware do Starlette sem a trava de segurança
+    starlette_app.build_middleware_stack()
+
+# 3. ADIÇÃO DOS NOSSOS MIDDLEWARES
+# A ordem importa: O último adicionado é o primeiro a rodar na requisição.
+
+# Permite conexões externas (CORS)
+starlette_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=True,
-    expose_headers=["*"]
 )
 
-# Health check endpoint
-@app.route("/health", methods=["GET"])
-async def health_check(request):
-    return JSONResponse({"status": "online", "service": "Amigo MCP Server"})
+# Ajusta o Host header para 'localhost' (para o MCP não reclamar internamente)
+starlette_app.add_middleware(FixHostHeaderMiddleware)
 
-@app.route("/", methods=["GET"])
-async def root(request):
-    return JSONResponse({
-        "message": "Amigo MCP Server está online!",
-        "endpoints": ["/health", "/tools"],
-        "docs": "Integração com API do Amigo para agendamentos"
-    })
+# --- REGISTRO DE ROTAS ---
 
-# Endpoint para listar tools (compatibilidade)
-@app.route("/tools", methods=["GET"])
-async def list_tools(request):
-    tools = [
-        {
-            "name": "buscar_paciente",
-            "description": "Busca paciente por nome ou CPF",
-            "parameters": {
-                "nome": {"type": "string", "optional": True},
-                "cpf": {"type": "string", "optional": True}
-            }
-        },
-        {
-            "name": "consultar_horarios",
-            "description": "Consulta horários disponíveis",
-            "parameters": {
-                "data": {"type": "string", "required": True, "format": "YYYY-MM-DD"}
-            }
-        },
-        {
-            "name": "agendar_consulta",
-            "description": "Agenda consulta",
-            "parameters": {
-                "start_date": {"type": "string", "required": True, "format": "ISO"},
-                "patient_id": {"type": "integer", "required": True},
-                "telefone": {"type": "string", "required": True}
-            }
-        }
-    ]
-    return JSONResponse({"tools": tools})
+starlette_app.add_route("/health", health_check, methods=["GET"])
+starlette_app.add_route("/", handle_root, methods=["GET", "POST", "HEAD"])
+starlette_app.add_route("/sse", redirect_to_messages, methods=["POST"])
 
-# ============================================
-# MIDDLEWARE FINAL PARA GARANTIR FUNCIONAMENTO
-# ============================================
-
-# Middleware que força aceitação de qualquer host
-class ForceAcceptHostMiddleware:
-    def __init__(self, app):
-        self.app = app
-    
-    async def __call__(self, scope, receive, send):
-        if scope['type'] == 'http':
-            # Remove qualquer verificação de host
-            pass
-        await self.app(scope, receive, send)
-
-# Adiciona nosso middleware de força como o PRIMEIRO middleware
-# Precisamos fazer isso manualmente reconstruindo a pilha
-
-# 1. Remove todos os middlewares atuais
-original_middleware = getattr(app, 'user_middleware', [])
-
-# 2. Cria nova lista começando com nosso middleware
-new_middleware = [
-    {"cls": ForceAcceptHostMiddleware, "options": {}},
-    *original_middleware
-]
-
-# 3. Aplica os novos middlewares
-app.user_middleware.clear()
-for mw in new_middleware:
-    app.add_middleware(mw["cls"], **mw.get("options", {}))
-
-# 4. Força reconstrução
-try:
-    app.middleware_stack = None
-    app.build_middleware_stack()
-except:
-    pass  # Se falhar, o app vai reconstruir quando necessário
-
-# ============================================
-# EXECUÇÃO
-# ============================================
-
-# Para Render, exportamos o app diretamente
-# O Render vai executar: uvicorn main:app --host 0.0.0.0 --port $PORT
-
-if __name__ == "__main__":
-    import uvicorn
-    
-    print("🚀 Iniciando Amigo MCP Server...")
-    print(f"📊 Configurações: PLACE_ID={CONFIG['PLACE_ID']}, EVENT_ID={CONFIG['EVENT_ID']}")
-    print("🔓 Modo de segurança: ACEITA QUALQUER HOST")
-    
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "10000")),
-        # Configurações cruciais para evitar erro 421
-        proxy_headers=True,
-        forwarded_allow_ips="*",
-        # Timeouts generosos
-        timeout_keep_alive=30,
-        # Logs para debug
-        log_level="info"
-    )
+# Registra todas as rotas de compatibilidade para o Double X
+for path in COMPATIBILITY_ROUTES:
+    starlette_app.add_route(path, handle_tools_discovery, methods=["GET", "POST"])
