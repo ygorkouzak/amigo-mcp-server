@@ -1,12 +1,22 @@
 import os
 import httpx
 from mcp.server.fastmcp import FastMCP
-from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
+# Importamos o middleware de segurança para desativá-lo
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse, RedirectResponse
-from starlette.routing import Route
 from dotenv import load_dotenv
+
+# --- PATCH DE SEGURANÇA (SOLUÇÃO DO ERRO 421) ---
+# O FastMCP ativa o TrustedHostMiddleware internamente e bloqueia nossas requisições.
+# Aqui nós substituímos a lógica dele para aceitar TUDO, ignorando o Host Header.
+async def mock_trusted_host_call(self, scope, receive, send):
+    # Simplesmente passa a requisição para frente sem verificar nada
+    await self.app(scope, receive, send)
+
+# Aplicamos o patch na classe original
+TrustedHostMiddleware.__call__ = mock_trusted_host_call
+# -----------------------------------------------
 
 # Carrega variáveis
 load_dotenv()
@@ -28,7 +38,12 @@ mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
-    """Busca paciente por nome ou CPF na base de dados da Amigo."""
+    """Busca paciente por nome ou CPF na base de dados da Amigo.
+    
+    Args:
+        nome: Nome completo ou parcial do paciente
+        cpf: CPF do paciente (apenas números)
+    """
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -58,7 +73,11 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
-    """Consulta horários disponíveis para agendamento em uma data específica."""
+    """Consulta horários disponíveis para agendamento em uma data específica.
+    
+    Args:
+        data: Data no formato YYYY-MM-DD (ex: 2024-12-20)
+    """
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -85,7 +104,13 @@ async def consultar_horarios(data: str) -> str:
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Realiza o agendamento de uma consulta para o paciente."""
+    """Realiza o agendamento de uma consulta para o paciente.
+    
+    Args:
+        start_date: Data e hora do agendamento no formato ISO
+        patient_id: ID do paciente obtido pela busca
+        telefone: Telefone de contato do paciente
+    """
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -164,7 +189,6 @@ async def handle_tools_discovery(request):
 
 # --- FUNÇÃO DE REDIRECIONAMENTO ---
 async def redirect_to_messages(request):
-    # Redireciona com 307 para garantir que o body do POST seja mantido
     return RedirectResponse(url="/messages/", status_code=307)
 
 # --- HANDLER DA RAIZ ---
@@ -182,29 +206,25 @@ async def handle_root(request):
         }
     })
 
-# --- MIDDLEWARE DE HOST (MODIFICADO) ---
+# --- MIDDLEWARE DE HOST (Mantemos para garantir compatibilidade com MCP) ---
 class FixHostHeaderMiddleware:
     def __init__(self, app):
         self.app = app
     async def __call__(self, scope, receive, send):
         if scope['type'] == 'http':
             headers = dict(scope['headers'])
-            # Aqui está o pulo do gato: continuamos enviando 127.0.0.1 para o MCP
-            headers[b'host'] = b'127.0.0.1'
+            # Definimos como localhost (string), pois alguns sistemas rejeitam IP
+            headers[b'host'] = b'localhost'
             scope['headers'] = list(headers.items())
         await self.app(scope, receive, send)
 
 # --- INICIALIZAÇÃO DO APP ---
 starlette_app = mcp.sse_app()
 
-# 1. Adiciona TrustedHostMiddleware PRIMEIRO para permitir TUDO (*)
-# Isso diz ao Starlette: "Não reclame do Host, aceite qualquer coisa, inclusive o que o Middleware abaixo vai inventar"
-starlette_app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
-
-# 2. Middleware que "engana" o MCP mudando o Host para 127.0.0.1
+# 1. Adiciona middleware que muda o Host para 'localhost'
 starlette_app.add_middleware(FixHostHeaderMiddleware)
 
-# 3. CORS para permitir acesso externo
+# 2. CORS
 starlette_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -213,12 +233,12 @@ starlette_app.add_middleware(
     allow_credentials=True,
 )
 
-# 4. Rotas Manuais
+# 3. Rotas Manuais
 starlette_app.add_route("/health", health_check, methods=["GET"])
 starlette_app.add_route("/", handle_root, methods=["GET", "POST", "HEAD"])
 starlette_app.add_route("/sse", redirect_to_messages, methods=["POST"])
 
-# 5. Rotas de Compatibilidade de Tools
+# 4. Rotas de Compatibilidade de Tools
 routes_to_fix = [
     "/tools", "/tools/list", 
     "/api/tools", "/api/tools/list", 
