@@ -123,11 +123,11 @@ async def health_check(request):
         "server": "amigo-mcp-server",
         "mode": "MCP Protocol",
         "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"],
-        "sse_endpoint": "https://amigo-mcp-server.onrender.com/sse"
+        "sse_endpoint": "https://amigo-mcp-server.onrender.com/sse",
+        "messages_endpoint": "https://amigo-mcp-server.onrender.com/messages/"
     })
 
-# --- MIDDLEWARE PARA CORRIGIR O HOST HEADER ---
-# Força o host para 127.0.0.1 (IPv4) para passar na validação de segurança
+# --- MIDDLEWARE CRUCIAL PARA CORRIGIR O HOST ---
 class FixHostHeaderMiddleware:
     def __init__(self, app):
         self.app = app
@@ -135,20 +135,21 @@ class FixHostHeaderMiddleware:
     async def __call__(self, scope, receive, send):
         if scope['type'] == 'http':
             headers = dict(scope['headers'])
-            # Usamos 127.0.0.1 em vez de localhost, pois localhost pode falhar na validação
+            # Truque: Usamos 127.0.0.1 em vez de localhost
+            # Isso passa na segurança do MCP E na segurança do Uvicorn
             headers[b'host'] = b'127.0.0.1'
             scope['headers'] = list(headers.items())
         await self.app(scope, receive, send)
 
-# --- CONFIGURAÇÃO FINAL DO STARLETTE ---
+# --- CONFIGURAÇÃO FINAL ---
 
-# 1. Obtemos o app Starlette original do MCP
+# 1. App original do MCP
 starlette_app = mcp.sse_app()
 
-# 2. Adicionamos o Middleware de correção de Host PRIMEIRO
+# 2. Middleware de Host (PRIMEIRO da lista)
 starlette_app.add_middleware(FixHostHeaderMiddleware)
 
-# 3. Adicionamos o Middleware de CORS (necessário para acesso externo)
+# 3. Middleware de CORS
 starlette_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -157,7 +158,5 @@ starlette_app.add_middleware(
     allow_credentials=True,
 )
 
-# 4. Inserimos a rota de health check
+# 4. Rota Health Check
 starlette_app.add_route("/health", health_check, methods=["GET"])
-
-# O objeto 'starlette_app' será executado pelo Uvicorn
