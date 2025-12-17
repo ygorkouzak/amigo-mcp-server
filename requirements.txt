@@ -1,4 +1,4 @@
-mcp
+mcp==0.1.20
 httpx
 uvicorn
 starlette
