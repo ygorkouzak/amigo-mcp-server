@@ -3,7 +3,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
 
-# Carrega variáveis de ambiente
+# Carrega variáveis
 load_dotenv()
 
 # --- CONFIGURAÇÕES ---
@@ -18,18 +18,10 @@ CONFIG = {
     "INSURANCE_ID": int(os.getenv("INSURANCE_ID", 1))
 }
 
-# --- INICIALIZAÇÃO DO SERVIDOR (CORREÇÃO DE SEGURANÇA) ---
-# Aqui aplicamos a solução da análise técnica:
-# 1. settings: Injeta 'allowed_hosts=["*"]' para desativar a validação de host do Starlette.
-# 2. dependencies: Garante que bibliotecas necessárias estejam no contexto.
-mcp = FastMCP(
-    "amigo-scheduler",
-    dependencies=["httpx"],
-    settings={
-        "allowed_hosts": ["*"],  # SOLUÇÃO CRÍTICA: Permite o domínio do Render
-        "debug": True
-    }
-)
+# --- INICIALIZAÇÃO DO SERVIDOR ---
+# REMOVIDO: settings={"allowed_hosts": ["*"]} (Causava erro na versão instalada)
+# A segurança será gerenciada pelas variáveis de ambiente do Render (MCP_ALLOWED_HOSTS=*)
+mcp = FastMCP("amigo-scheduler", dependencies=["httpx"])
 
 # --- DEFINIÇÃO DAS TOOLS ---
 
@@ -106,13 +98,8 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro ao agendar: {str(e)}"
 
-# --- PONTO DE ENTRADA (EXECUÇÃO) ---
+# --- PONTO DE ENTRADA ---
 if __name__ == "__main__":
-    # O Render injeta a variável PORT automaticamente.
-    # Precisamos converter para int e garantir que o host seja 0.0.0.0
     port = int(os.environ.get("PORT", 8080))
-    
-    print(f"Iniciando servidor MCP na porta {port} com allowed_hosts=['*']")
-    
-    # Inicia o servidor no modo SSE (compatível com Web/Double X)
+    # Inicia o servidor. A configuração de host deve vir do ambiente.
     mcp.run(transport="sse", host="0.0.0.0", port=port)
