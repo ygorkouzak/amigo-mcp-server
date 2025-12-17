@@ -1,34 +1,9 @@
 import os
 import httpx
-import logging
+from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
 
-# --- BYPASS DE SEGURANÇA DO MCP (SOLUÇÃO FINAL PARA ERRO 421) ---
-# O módulo mcp.server.transport_security bloqueia hosts externos.
-# Vamos substituir a função que faz essa checagem por uma que aprova tudo.
-try:
-    import mcp.server.transport_security
-    
-    # Criamos uma função que não faz nada (não levanta erro)
-    def permissive_validate_host(scope, allowed_hosts):
-        return None # Tudo certo, pode passar!
-
-    # Substituímos a função original pela nossa versão permissiva
-    mcp.server.transport_security.validate_host = permissive_validate_host
-    print("✅ Patch de segurança aplicado: validate_host neutralizado.")
-except ImportError:
-    print("⚠️ Aviso: Módulo mcp.server.transport_security não encontrado (pode ser outra versão).")
-# ---------------------------------------------------------------
-
-from mcp.server.fastmcp import FastMCP
-from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse, RedirectResponse
-
-# Configuração de Logs
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("amigo-mcp")
-
-# Carrega variáveis
+# Carrega variáveis de ambiente
 load_dotenv()
 
 # --- CONFIGURAÇÕES ---
@@ -43,18 +18,18 @@ CONFIG = {
     "INSURANCE_ID": int(os.getenv("INSURANCE_ID", 1))
 }
 
-# Rotas de compatibilidade
-COMPATIBILITY_ROUTES = [
-    "/tools", "/tools/list", 
-    "/api/tools", "/api/tools/list", 
-    "/mcp/tools/list",
-    "/sse/tools", "/sse/tools/list",
-    "/sse/api/tools", "/sse/api/tools/list",
-    "/sse/mcp/tools/list"
-]
-
-# --- SERVIDOR MCP ---
-mcp = FastMCP("amigo-scheduler")
+# --- INICIALIZAÇÃO DO SERVIDOR (CORREÇÃO DE SEGURANÇA) ---
+# Aqui aplicamos a solução da análise técnica:
+# 1. settings: Injeta 'allowed_hosts=["*"]' para desativar a validação de host do Starlette.
+# 2. dependencies: Garante que bibliotecas necessárias estejam no contexto.
+mcp = FastMCP(
+    "amigo-scheduler",
+    dependencies=["httpx"],
+    settings={
+        "allowed_hosts": ["*"],  # SOLUÇÃO CRÍTICA: Permite o domínio do Render
+        "debug": True
+    }
+)
 
 # --- DEFINIÇÃO DAS TOOLS ---
 
@@ -62,10 +37,12 @@ mcp = FastMCP("amigo-scheduler")
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     """Busca paciente por nome ou CPF na base de dados da Amigo."""
     if not API_TOKEN: return "Erro: Token ausente."
+    
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {}
     if nome: params['name'] = nome
     if cpf: params['cpf'] = cpf
+    
     if not params: return "Erro: Forneça nome ou CPF."
 
     async with httpx.AsyncClient() as client:
@@ -80,10 +57,17 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
-    """Consulta horários disponíveis."""
+    """Consulta horários disponíveis (Formato data: YYYY-MM-DD)."""
     if not API_TOKEN: return "Erro: Token ausente."
+    
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
-    params = {"date": data, "event_id": CONFIG["EVENT_ID"], "place_id": CONFIG["PLACE_ID"], "insurance_id": CONFIG["INSURANCE_ID"]}
+    params = {
+        "date": data,
+        "event_id": CONFIG["EVENT_ID"],
+        "place_id": CONFIG["PLACE_ID"],
+        "insurance_id": CONFIG["INSURANCE_ID"]
+    }
+    
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.get(
@@ -98,12 +82,21 @@ async def consultar_horarios(data: str) -> str:
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
     """Realiza agendamento."""
     if not API_TOKEN: return "Erro: Token ausente."
+    
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     body = {
-        "insurance_id": CONFIG["INSURANCE_ID"], "event_id": CONFIG["EVENT_ID"], "place_id": CONFIG["PLACE_ID"],
-        "start_date": start_date, "patient_id": patient_id, "account_id": CONFIG["ACCOUNT_ID"],
-        "user_id": CONFIG["USER_ID"], "chat_id": "doublex_integration", "scheduler_phone": telefone, "is_dependent_schedule": False
+        "insurance_id": CONFIG["INSURANCE_ID"],
+        "event_id": CONFIG["EVENT_ID"],
+        "place_id": CONFIG["PLACE_ID"],
+        "start_date": start_date,
+        "patient_id": patient_id,
+        "account_id": CONFIG["ACCOUNT_ID"],
+        "user_id": CONFIG["USER_ID"],
+        "chat_id": "doublex_integration",
+        "scheduler_phone": telefone,
+        "is_dependent_schedule": False
     }
+    
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(
@@ -113,58 +106,13 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro ao agendar: {str(e)}"
 
-# --- HANDLERS ESPECIAIS ---
-
-async def health_check(request):
-    return JSONResponse({"status": "online", "mode": "Production"})
-
-async def handle_tools_discovery(request):
-    tools_schema = {
-        "tools": [
-            {
-                "name": "buscar_paciente",
-                "description": "Busca paciente.",
-                "input_schema": {"type": "object", "properties": {"nome": {"type": "string"}, "cpf": {"type": "string"}}}
-            },
-            {
-                "name": "consultar_horarios",
-                "description": "Consulta horários.",
-                "input_schema": {"type": "object", "properties": {"data": {"type": "string"}}, "required": ["data"]}
-            },
-            {
-                "name": "agendar_consulta",
-                "description": "Agenda consulta.",
-                "input_schema": {"type": "object", "properties": {"start_date": {"type": "string"}, "patient_id": {"type": "integer"}, "telefone": {"type": "string"}}, "required": ["start_date", "patient_id", "telefone"]}
-            }
-        ]
-    }
-    return JSONResponse(tools_schema)
-
-async def redirect_to_messages(request):
-    return RedirectResponse(url="/messages/", status_code=307)
-
-async def handle_root(request):
-    if request.method == "POST": return await redirect_to_messages(request)
-    return JSONResponse({"status": "online", "message": "Amigo MCP Server Running", "endpoints": {"sse": "/sse", "messages": "/messages/"}})
-
-# --- MONTAGEM DO APP ---
-
-# 1. Gera o app base
-app = mcp.sse_app()
-
-# 2. Adiciona CORS (Permite tudo)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
-)
-
-# 3. Registra Rotas
-app.add_route("/health", health_check, methods=["GET"])
-app.add_route("/", handle_root, methods=["GET", "POST", "HEAD"])
-app.add_route("/sse", redirect_to_messages, methods=["POST"])
-
-for path in COMPATIBILITY_ROUTES:
-    app.add_route(path, handle_tools_discovery, methods=["GET", "POST"])
+# --- PONTO DE ENTRADA (EXECUÇÃO) ---
+if __name__ == "__main__":
+    # O Render injeta a variável PORT automaticamente.
+    # Precisamos converter para int e garantir que o host seja 0.0.0.0
+    port = int(os.environ.get("PORT", 8080))
+    
+    print(f"Iniciando servidor MCP na porta {port} com allowed_hosts=['*']")
+    
+    # Inicia o servidor no modo SSE (compatível com Web/Double X)
+    mcp.run(transport="sse", host="0.0.0.0", port=port)
