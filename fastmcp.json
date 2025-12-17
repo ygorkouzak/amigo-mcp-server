@@ -1,0 +1,15 @@
+{
+  "server": {
+    "type": "fastmcp",
+    "name": "RenderMCPServer"
+  },
+  "deployment": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "env": {
+      "MCP_ALLOWED_HOSTS": "*",
+      "ALLOWED_HOSTS": "*",
+      "FASTMCP_LOG_LEVEL": "DEBUG"
+    }
+  }
+}
