@@ -4,7 +4,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.routing import Route
+from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse
 from dotenv import load_dotenv
 
@@ -139,12 +139,9 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro ao agendar consulta: {str(e)}"
 
-# --- CRIAÇÃO DO APP STARLETTE ---
-# O FastMCP já cria um app Starlette internamente
-# Vamos usar diretamente o sse_app() e adicionar apenas o health check
-
+# --- ENDPOINT DE HEALTH CHECK ---
 async def health_check(request):
-    """Endpoint simples para verificar se o servidor está online"""
+    """Endpoint para verificar se o servidor está online"""
     return JSONResponse({
         "status": "online",
         "server": "amigo-mcp-server",
@@ -152,23 +149,15 @@ async def health_check(request):
         "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"],
         "endpoints": {
             "health": "/health",
-            "sse": "/sse"
-        }
+            "sse": "/sse",
+            "messages": "/messages/"
+        },
+        "instructions": "Connect MCP client to: https://amigo-mcp-server.onrender.com/sse"
     })
 
-# Obtém o app SSE do MCP
-mcp_sse_app = mcp.sse_app()
-
-# Cria um novo Starlette app que vai wrappear tudo
-from starlette.routing import Mount
-
-routes = [
-    Route("/health", health_check, methods=["GET"]),
-    # Monta o MCP SSE app em /sse
-    Mount("/sse", app=mcp_sse_app),
-]
-
-middleware = [
+# --- CONFIGURAÇÃO CORRIGIDA ---
+# Adiciona middleware CORS diretamente ao MCP
+mcp_middleware = [
     Middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -178,8 +167,13 @@ middleware = [
     ),
 ]
 
-starlette_app = Starlette(
-    routes=routes,
-    middleware=middleware,
-    debug=False
-)
+# Obtém o app SSE do MCP com middleware customizado
+mcp_sse_app = mcp.sse_app(custom_middleware=mcp_middleware)
+
+# Adiciona a rota de health check ao próprio MCP app usando custom_route
+@mcp.custom_route("/health", methods=["GET"])
+async def mcp_health_check(request):
+    return await health_check(request)
+
+# Exporta o app diretamente (montado na raiz)
+starlette_app = mcp_sse_app
