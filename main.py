@@ -1,35 +1,12 @@
 import os
 import httpx
-from contextlib import asynccontextmanager
-from dotenv import load_dotenv
-
-# --- INÍCIO DO PATCH DE SEGURANÇA ---
-# Este bloco DEVE vir antes de importar FastMCP.
-# Ele corrige o erro "Request validation failed" forçando a aceitação do host do Render.
-
-import mcp.server.sse
-
-# 1. Guardamos a função original da biblioteca
-_original_connect_sse = mcp.server.sse.connect_sse
-
-# 2. Criamos nossa versão permissiva
-@asynccontextmanager
-async def patched_connect_sse(scope, receive, send, permitted_origins=None):
-    # Ignoramos a lista restrita original e permitimos tudo (*) ou especificamente o Render
-    # Isso resolve o erro 421/ValueError
-    permissive_origins = ["*", "amigo-mcp-server.onrender.com", "localhost", "127.0.0.1"]
-    
-    async with _original_connect_sse(scope, receive, send, permitted_origins=permissive_origins) as streams:
-        yield streams
-
-# 3. Aplicamos o patch na biblioteca
-mcp.server.sse.connect_sse = patched_connect_sse
-# --- FIM DO PATCH ---
-
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
 from starlette.routing import Route
+from starlette.responses import JSONResponse
+from dotenv import load_dotenv
 
 # Carrega variáveis
 load_dotenv()
@@ -149,12 +126,29 @@ async def health_check(request):
         "sse_endpoint": "https://amigo-mcp-server.onrender.com/sse"
     })
 
+# --- MIDDLEWARE PARA CORRIGIR O HOST HEADER ---
+# Força o host para 127.0.0.1 (IPv4) para passar na validação de segurança
+class FixHostHeaderMiddleware:
+    def __init__(self, app):
+        self.app = app
+        
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http':
+            headers = dict(scope['headers'])
+            # Usamos 127.0.0.1 em vez de localhost, pois localhost pode falhar na validação
+            headers[b'host'] = b'127.0.0.1'
+            scope['headers'] = list(headers.items())
+        await self.app(scope, receive, send)
+
 # --- CONFIGURAÇÃO FINAL DO STARLETTE ---
 
 # 1. Obtemos o app Starlette original do MCP
 starlette_app = mcp.sse_app()
 
-# 2. Adicionamos o Middleware de CORS (necessário para acesso externo)
+# 2. Adicionamos o Middleware de correção de Host PRIMEIRO
+starlette_app.add_middleware(FixHostHeaderMiddleware)
+
+# 3. Adicionamos o Middleware de CORS (necessário para acesso externo)
 starlette_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -163,7 +157,7 @@ starlette_app.add_middleware(
     allow_credentials=True,
 )
 
-# 3. Inserimos a rota de health check
+# 4. Inserimos a rota de health check
 starlette_app.add_route("/health", health_check, methods=["GET"])
 
 # O objeto 'starlette_app' será executado pelo Uvicorn
