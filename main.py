@@ -26,7 +26,7 @@ CONFIG = {
 }
 
 # =====================
-# MCP SERVER
+# MCP
 # =====================
 mcp = FastMCP("amigo-scheduler")
 
@@ -35,9 +35,6 @@ mcp = FastMCP("amigo-scheduler")
 # =====================
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
-    if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN não configurado."
-
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {}
 
@@ -46,24 +43,14 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     if cpf:
         params["cpf"] = cpf
 
-    if not params:
-        return "Informe nome ou CPF."
-
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{AMIGO_API_URL}/patients",
-            params=params,
-            headers=headers,
-        )
-        resp.raise_for_status()
-        return resp.text
+        r = await client.get(f"{AMIGO_API_URL}/patients", params=params, headers=headers)
+        r.raise_for_status()
+        return r.text
 
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
-    if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN não configurado."
-
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {
         "date": data,
@@ -73,24 +60,13 @@ async def consultar_horarios(data: str) -> str:
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{AMIGO_API_URL}/calendar",
-            params=params,
-            headers=headers,
-        )
-        resp.raise_for_status()
-        return resp.text
+        r = await client.get(f"{AMIGO_API_URL}/calendar", params=params, headers=headers)
+        r.raise_for_status()
+        return r.text
 
 
 @mcp.tool()
-async def agendar_consulta(
-    start_date: str,
-    patient_id: int,
-    telefone: str,
-) -> str:
-    if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN não configurado."
-
+async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     payload = {
         "insurance_id": CONFIG["INSURANCE_ID"],
@@ -106,47 +82,29 @@ async def agendar_consulta(
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{AMIGO_API_URL}/attendances",
-            json=payload,
-            headers=headers,
-        )
-        resp.raise_for_status()
-        return resp.text
+        r = await client.post(f"{AMIGO_API_URL}/attendances", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.text
 
 
 # =====================
-# SSE TRANSPORT
+# SSE
 # =====================
 transport = SSEServerTransport("/sse")
 
-# =====================
-# HEALTH CHECK
-# =====================
 async def health(request):
     return JSONResponse({
         "status": "online",
         "server": "amigo-mcp-server",
-        "mode": "MCP Protocol (SSE)",
-        "tools": [
-            "buscar_paciente",
-            "consultar_horarios",
-            "agendar_consulta",
-        ],
-        "connect": "/sse",
+        "mode": "MCP SSE",
+        "connect": "/sse"
     })
 
-# =====================
-# STARLETTE APP
-# =====================
 app = Starlette(
     routes=[
-        Route("/health", health, methods=["GET"]),
-        Route("/sse", transport.handle, methods=["GET"]),
+        Route("/health", health),
+        Route("/sse", transport.handle),
     ]
 )
 
-# =====================
-# MOUNT MCP
-# =====================
 transport.mount(mcp)
