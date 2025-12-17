@@ -22,7 +22,7 @@ CONFIG = {
 }
 
 # --- SERVIDOR MCP ---
-# Instanciação limpa, sem argumentos inventados que quebram a versão instalada
+# Instanciamos LIMPO, sem 'settings', para não dar erro de versão
 mcp = FastMCP("amigo-scheduler", dependencies=["httpx"])
 
 # --- DEFINIÇÃO DAS TOOLS ---
@@ -73,12 +73,12 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro ao agendar: {str(e)}"
 
-# --- ASGI WRAPPER (A SOLUÇÃO DO ERRO 421) ---
+# --- ASGI WRAPPER (A SOLUÇÃO DO ERRO 421 E COMPATIBILIDADE) ---
 
 # 1. Pegamos a aplicação original do MCP
 original_app = mcp.sse_app()
 
-# 2. Handler manual para descoberta de tools (Double X Compatibility)
+# 2. Handler manual para descoberta de tools (Para o Double X)
 async def handle_tools_discovery(scope, receive, send):
     tools_schema = {
         "tools": [
@@ -91,24 +91,24 @@ async def handle_tools_discovery(scope, receive, send):
     await response(scope, receive, send)
 
 # 3. APLICAÇÃO PRINCIPAL (Wrapper)
-# O Uvicorn vai chamar ESTA função, não a do MCP.
+# Esta é a função que o Uvicorn vai rodar. Ela protege o FastMCP.
 async def app(scope, receive, send):
     if scope['type'] == 'http':
-        # TRUQUE DE MESTRE: Reescrevemos o Host para 'localhost'
-        # Isso engana qualquer validação interna do FastMCP/Starlette
+        # --- PASSO CRÍTICO: REESCRITA DE HOST ---
+        # Enganamos o FastMCP fazendo ele acreditar que é localhost
         headers = dict(scope.get('headers', []))
         headers[b'host'] = b'localhost'
         scope['headers'] = list(headers.items())
 
         path = scope['path']
         
-        # Rotas Manuais (Interceptação antes do MCP)
+        # Rotas Manuais (Interceptação)
         if path == '/health':
             response = JSONResponse({"status": "online", "mode": "ASGI Wrapper"})
             await response(scope, receive, send)
             return
             
-        # Compatibilidade com Double X (Tools List)
+        # Compatibilidade com Double X (Tools List em vários caminhos)
         if 'tools' in path and 'list' in path:
             await handle_tools_discovery(scope, receive, send)
             return
@@ -119,11 +119,11 @@ async def app(scope, receive, send):
             await response(scope, receive, send)
             return
 
-        # Raiz GET
+        # Raiz GET (Apenas visualização)
         if path == '/' and scope['method'] == 'GET':
              response = JSONResponse({"status": "online", "message": "Amigo MCP Running via Wrapper"})
              await response(scope, receive, send)
              return
 
-    # Se não foi interceptado, entrega para o FastMCP (que agora acha que é localhost)
+    # Se não foi interceptado, entrega para o FastMCP (que agora está seguro)
     await original_app(scope, receive, send)
