@@ -4,6 +4,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse
 from dotenv import load_dotenv
@@ -11,9 +12,18 @@ from dotenv import load_dotenv
 # Carrega variáveis
 load_dotenv()
 
-# --- CONFIGURAÇÕES ---
+# --- 1. CONFIGURAÇÕES ---
 AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
 API_TOKEN = os.getenv("AMIGO_API_TOKEN")
+
+# 👇 LISTA DE DOMÍNIOS PERMITIDOS (A FORMA CORRETA)
+# Aqui dizemos explicitamente quem pode acessar este servidor.
+ALLOWED_HOSTS = [
+    "amigo-mcp-server.onrender.com",  # Seu domínio no Render
+    "localhost",                      # Para testes locais
+    "127.0.0.1",                      # Para testes locais
+    "0.0.0.0"                         # Para o container interno
+]
 
 CONFIG = {
     "PLACE_ID": int(os.getenv("PLACE_ID", 6955)),
@@ -23,152 +33,82 @@ CONFIG = {
     "INSURANCE_ID": int(os.getenv("INSURANCE_ID", 1))
 }
 
-# --- SERVIDOR MCP ---
+# --- 2. SERVIDOR MCP ---
 mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
-    """Busca paciente por nome ou CPF na base de dados da Amigo.
-    
-    Args:
-        nome: Nome completo ou parcial do paciente
-        cpf: CPF do paciente (apenas números)
-    
-    Returns:
-        Dados do paciente encontrado em formato JSON
-    """
-    if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN ausente."
-    
+    """Busca paciente por nome ou CPF."""
+    if not API_TOKEN: return "Erro: AMIGO_API_TOKEN ausente."
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {}
-    
-    if nome:
-        params['name'] = nome
-    if cpf:
-        params['cpf'] = cpf
-    
-    if not params:
-        return "Erro: Forneça nome ou CPF para buscar."
+    if nome: params['name'] = nome
+    if cpf: params['cpf'] = cpf
+    if not params: return "Erro: Forneça nome ou CPF."
 
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.get(
-                f"{AMIGO_API_URL}/patients",
-                params=params,
-                headers=headers,
-                timeout=30.0
-            )
-            resp.raise_for_status()
+            resp = await client.get(f"{AMIGO_API_URL}/patients", params=params, headers=headers)
             return str(resp.json())
         except Exception as e:
-            return f"Erro ao buscar paciente: {str(e)}"
+            return f"Erro API: {str(e)}"
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
-    """Consulta horários disponíveis para agendamento em uma data específica.
-    
-    Args:
-        data: Data no formato YYYY-MM-DD (ex: 2024-12-20)
-    
-    Returns:
-        Lista de horários disponíveis em formato JSON
-    """
-    if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN ausente."
-    
+    """Consulta horários para YYYY-MM-DD."""
+    if not API_TOKEN: return "Erro: AMIGO_API_TOKEN ausente."
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {
-        "date": data,
-        "event_id": CONFIG["EVENT_ID"],
-        "place_id": CONFIG["PLACE_ID"],
-        "insurance_id": CONFIG["INSURANCE_ID"]
+        "date": data, "event_id": CONFIG["EVENT_ID"],
+        "place_id": CONFIG["PLACE_ID"], "insurance_id": CONFIG["INSURANCE_ID"]
     }
-    
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.get(
-                f"{AMIGO_API_URL}/calendar",
-                params=params,
-                headers=headers,
-                timeout=30.0
-            )
-            resp.raise_for_status()
+            resp = await client.get(f"{AMIGO_API_URL}/calendar", params=params, headers=headers)
             return str(resp.json())
         except Exception as e:
-            return f"Erro ao consultar horários: {str(e)}"
+            return f"Erro API: {str(e)}"
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Realiza o agendamento de uma consulta para o paciente.
-    
-    Args:
-        start_date: Data e hora do agendamento no formato ISO (ex: 2024-12-20T14:30:00)
-        patient_id: ID do paciente obtido pela busca
-        telefone: Telefone de contato do paciente
-    
-    Returns:
-        Confirmação do agendamento com detalhes
-    """
-    if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN ausente."
-    
+    """Realiza o agendamento."""
+    if not API_TOKEN: return "Erro: AMIGO_API_TOKEN ausente."
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     body = {
-        "insurance_id": CONFIG["INSURANCE_ID"],
-        "event_id": CONFIG["EVENT_ID"],
-        "place_id": CONFIG["PLACE_ID"],
-        "start_date": start_date,
-        "patient_id": patient_id,
-        "account_id": CONFIG["ACCOUNT_ID"],
-        "user_id": CONFIG["USER_ID"],
-        "chat_id": "doublex_integration",
-        "scheduler_phone": telefone,
-        "is_dependent_schedule": False
+        "insurance_id": CONFIG["INSURANCE_ID"], "event_id": CONFIG["EVENT_ID"],
+        "place_id": CONFIG["PLACE_ID"], "start_date": start_date,
+        "patient_id": patient_id, "account_id": CONFIG["ACCOUNT_ID"],
+        "user_id": CONFIG["USER_ID"], "chat_id": "whatsapp_integration",
+        "scheduler_phone": telefone, "is_dependent_schedule": False
     }
-    
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.post(
-                f"{AMIGO_API_URL}/attendances",
-                json=body,
-                headers=headers,
-                timeout=30.0
-            )
-            return f"Status: {resp.status_code}. Resposta: {str(resp.json())}"
+            resp = await client.post(f"{AMIGO_API_URL}/attendances", json=body, headers=headers)
+            return f"Status: {resp.status_code}. Resp: {str(resp.json())}"
         except Exception as e:
-            return f"Erro ao agendar consulta: {str(e)}"
+            return f"Erro API: {str(e)}"
 
-# --- ENDPOINT DE HEALTH CHECK ---
+# --- 3. CONFIGURAÇÃO OFICIAL DE SEGURANÇA ---
+# Criamos o app SSE do MCP
+mcp_asgi_app = mcp.sse_app()
+
 async def health_check(request):
-    """Endpoint simples para verificar se o servidor está online"""
-    return JSONResponse({
-        "status": "online",
-        "server": "amigo-mcp-server",
-        "mode": "MCP Protocol",
-        "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"]
-    })
+    return JSONResponse({"status": "online", "mode": "Production Secure"})
 
-# --- CONFIGURAÇÃO CORRETA DO STARLETTE ---
-# Primeiro criamos o app SSE do MCP
-mcp_sse_app = mcp.sse_app()
-
-# Rotas: /health separado, e /sse para o MCP
 routes = [
-    Route("/health", health_check, methods=["GET"]),
-    Mount("/sse", app=mcp_sse_app),  # 🔧 CORREÇÃO: MCP em /sse
+    Route("/", health_check),
+    Route("/health", health_check),
+    Mount("/", app=mcp_asgi_app)
 ]
 
-# Middleware CORS para permitir conexões externas
+# MIDDLEWARES: AQUI ESTÁ A CORREÇÃO REAL
 middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-        allow_credentials=True,
-    ),
+    # 1. Segurança de Host: Permite APENAS os domínios listados em ALLOWED_HOSTS
+    Middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS),
+    
+    # 2. CORS: Permite que o Double X (navegador/servidor externo) acesse nossa API
+    Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
 ]
 
-# App Starlette final
+# Montamos o app final com as regras oficiais
 starlette_app = Starlette(routes=routes, middleware=middleware)
