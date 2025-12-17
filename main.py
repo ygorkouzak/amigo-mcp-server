@@ -4,7 +4,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.routing import Route, Mount
+from starlette.routing import Route
 from starlette.responses import JSONResponse
 from dotenv import load_dotenv
 
@@ -139,27 +139,35 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro ao agendar consulta: {str(e)}"
 
-# --- ENDPOINT DE HEALTH CHECK ---
+# --- CRIAÇÃO DO APP STARLETTE ---
+# O FastMCP já cria um app Starlette internamente
+# Vamos usar diretamente o sse_app() e adicionar apenas o health check
+
 async def health_check(request):
     """Endpoint simples para verificar se o servidor está online"""
     return JSONResponse({
         "status": "online",
         "server": "amigo-mcp-server",
         "mode": "MCP Protocol",
-        "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"]
+        "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"],
+        "endpoints": {
+            "health": "/health",
+            "sse": "/sse"
+        }
     })
 
-# --- CONFIGURAÇÃO CORRETA DO STARLETTE ---
-# Primeiro criamos o app SSE do MCP
+# Obtém o app SSE do MCP
 mcp_sse_app = mcp.sse_app()
 
-# Rotas: /health separado, e /sse para o MCP
+# Cria um novo Starlette app que vai wrappear tudo
+from starlette.routing import Mount
+
 routes = [
     Route("/health", health_check, methods=["GET"]),
-    Mount("/sse", app=mcp_sse_app),  # 🔧 CORREÇÃO: MCP em /sse
+    # Monta o MCP SSE app em /sse
+    Mount("/sse", app=mcp_sse_app),
 ]
 
-# Middleware CORS para permitir conexões externas
 middleware = [
     Middleware(
         CORSMiddleware,
@@ -170,5 +178,8 @@ middleware = [
     ),
 ]
 
-# App Starlette final
-starlette_app = Starlette(routes=routes, middleware=middleware)
+starlette_app = Starlette(
+    routes=routes,
+    middleware=middleware,
+    debug=False
+)
