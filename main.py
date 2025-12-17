@@ -1,16 +1,19 @@
 import os
 import httpx
 from dotenv import load_dotenv
+
 from mcp.server.fastmcp import FastMCP
+from mcp.server.sse import SSEServerTransport
+
+from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
-from starlette.middleware.cors import CORSMiddleware
 
+# =====================
+# ENV
+# =====================
 load_dotenv()
 
-# =====================
-# CONFIG
-# =====================
 AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
 API_TOKEN = os.getenv("AMIGO_API_TOKEN")
 
@@ -25,12 +28,7 @@ CONFIG = {
 # =====================
 # MCP SERVER
 # =====================
-mcp = FastMCP(
-    name="amigo-scheduler",
-    trusted_origins=["*"],
-    validate_requests=False, 
-)
-
+mcp = FastMCP("amigo-scheduler")
 
 # =====================
 # TOOLS
@@ -38,7 +36,7 @@ mcp = FastMCP(
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
     if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN ausente."
+        return "Erro: AMIGO_API_TOKEN não configurado."
 
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {}
@@ -49,18 +47,22 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
         params["cpf"] = cpf
 
     if not params:
-        return "Erro: informe nome ou CPF."
+        return "Informe nome ou CPF."
 
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{AMIGO_API_URL}/patients", params=params, headers=headers)
-        r.raise_for_status()
-        return r.text
+        resp = await client.get(
+            f"{AMIGO_API_URL}/patients",
+            params=params,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return resp.text
 
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
     if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN ausente."
+        return "Erro: AMIGO_API_TOKEN não configurado."
 
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     params = {
@@ -71,15 +73,23 @@ async def consultar_horarios(data: str) -> str:
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{AMIGO_API_URL}/calendar", params=params, headers=headers)
-        r.raise_for_status()
-        return r.text
+        resp = await client.get(
+            f"{AMIGO_API_URL}/calendar",
+            params=params,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return resp.text
 
 
 @mcp.tool()
-async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
+async def agendar_consulta(
+    start_date: str,
+    patient_id: int,
+    telefone: str,
+) -> str:
     if not API_TOKEN:
-        return "Erro: AMIGO_API_TOKEN ausente."
+        return "Erro: AMIGO_API_TOKEN não configurado."
 
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     payload = {
@@ -96,45 +106,47 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(
+        resp = await client.post(
             f"{AMIGO_API_URL}/attendances",
             json=payload,
             headers=headers,
         )
-        r.raise_for_status()
-        return r.text
+        resp.raise_for_status()
+        return resp.text
 
+
+# =====================
+# SSE TRANSPORT
+# =====================
+transport = SSEServerTransport("/sse")
 
 # =====================
 # HEALTH CHECK
 # =====================
 async def health(request):
-    return JSONResponse(
-        {
-            "status": "online",
-            "server": "amigo-mcp-server",
-            "mode": "MCP Protocol (SSE)",
-            "tools": [
-                "buscar_paciente",
-                "consultar_horarios",
-                "agendar_consulta",
-            ],
-            "connect": "/sse",
-        }
-    )
+    return JSONResponse({
+        "status": "online",
+        "server": "amigo-mcp-server",
+        "mode": "MCP Protocol (SSE)",
+        "tools": [
+            "buscar_paciente",
+            "consultar_horarios",
+            "agendar_consulta",
+        ],
+        "connect": "/sse",
+    })
 
 # =====================
-# APP EXPORT
+# STARLETTE APP
 # =====================
-app = mcp.sse_app()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = Starlette(
+    routes=[
+        Route("/health", health, methods=["GET"]),
+        Route("/sse", transport.handle, methods=["GET"]),
+    ]
 )
 
-app.routes.insert(0, Route("/health", health, methods=["GET"]))
-
-starlette_app = app
+# =====================
+# MOUNT MCP
+# =====================
+transport.mount(mcp)
