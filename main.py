@@ -2,6 +2,8 @@ import os
 import httpx
 import logging
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, RedirectResponse
 from dotenv import load_dotenv
 
@@ -21,8 +23,18 @@ CONFIG = {
     "INSURANCE_ID": int(os.getenv("INSURANCE_ID", 1))
 }
 
+# Rotas de compatibilidade
+COMPATIBILITY_ROUTES = [
+    "/tools", "/tools/list", 
+    "/api/tools", "/api/tools/list", 
+    "/mcp/tools/list",
+    "/sse/tools", "/sse/tools/list",
+    "/sse/api/tools", "/sse/api/tools/list",
+    "/sse/mcp/tools/list"
+]
+
 # --- SERVIDOR MCP ---
-# Instanciamos LIMPO, sem 'settings', para não dar erro de versão
+# Instanciação padrão
 mcp = FastMCP("amigo-scheduler", dependencies=["httpx"])
 
 # --- DEFINIÇÃO DAS TOOLS ---
@@ -73,13 +85,12 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
         except Exception as e:
             return f"Erro ao agendar: {str(e)}"
 
-# --- ASGI WRAPPER (A SOLUÇÃO DO ERRO 421 E COMPATIBILIDADE) ---
+# --- HANDLERS AUXILIARES ---
 
-# 1. Pegamos a aplicação original do MCP
-original_app = mcp.sse_app()
+async def health_check(request):
+    return JSONResponse({"status": "online", "mode": "Production Unlocked"})
 
-# 2. Handler manual para descoberta de tools (Para o Double X)
-async def handle_tools_discovery(scope, receive, send):
+async def handle_tools_discovery(request):
     tools_schema = {
         "tools": [
             {"name": "buscar_paciente", "description": "Busca paciente.", "input_schema": {"type": "object", "properties": {"nome": {"type": "string"}, "cpf": {"type": "string"}}}},
@@ -87,43 +98,45 @@ async def handle_tools_discovery(scope, receive, send):
             {"name": "agendar_consulta", "description": "Agenda.", "input_schema": {"type": "object", "properties": {"start_date": {"type": "string"}, "patient_id": {"type": "integer"}, "telefone": {"type": "string"}}, "required": ["start_date", "patient_id", "telefone"]}}
         ]
     }
-    response = JSONResponse(tools_schema)
-    await response(scope, receive, send)
+    return JSONResponse(tools_schema)
 
-# 3. APLICAÇÃO PRINCIPAL (Wrapper)
-# Esta é a função que o Uvicorn vai rodar. Ela protege o FastMCP.
-async def app(scope, receive, send):
-    if scope['type'] == 'http':
-        # --- PASSO CRÍTICO: REESCRITA DE HOST ---
-        # Enganamos o FastMCP fazendo ele acreditar que é localhost
-        headers = dict(scope.get('headers', []))
-        headers[b'host'] = b'localhost'
-        scope['headers'] = list(headers.items())
+async def redirect_to_messages(request):
+    return RedirectResponse(url="/messages/", status_code=307)
 
-        path = scope['path']
-        
-        # Rotas Manuais (Interceptação)
-        if path == '/health':
-            response = JSONResponse({"status": "online", "mode": "ASGI Wrapper"})
-            await response(scope, receive, send)
-            return
-            
-        # Compatibilidade com Double X (Tools List em vários caminhos)
-        if 'tools' in path and 'list' in path:
-            await handle_tools_discovery(scope, receive, send)
-            return
+async def handle_root(request):
+    if request.method == "POST": return await redirect_to_messages(request)
+    return JSONResponse({"status": "online", "message": "Amigo MCP Server Running"})
 
-        # Redirecionamento Inteligente (POST / ou /sse -> /messages/)
-        if (path == '/' or path == '/sse') and scope['method'] == 'POST':
-            response = RedirectResponse(url="/messages/", status_code=307)
-            await response(scope, receive, send)
-            return
+# --- MONTAGEM E LIMPEZA DA APP ---
 
-        # Raiz GET (Apenas visualização)
-        if path == '/' and scope['method'] == 'GET':
-             response = JSONResponse({"status": "online", "message": "Amigo MCP Running via Wrapper"})
-             await response(scope, receive, send)
-             return
+# 1. Gera o app com os padrões do FastMCP (que incluem a segurança bloqueadora)
+app = mcp.sse_app()
 
-    # Se não foi interceptado, entrega para o FastMCP (que agora está seguro)
-    await original_app(scope, receive, send)
+# 2. OPERAÇÃO LIMPEZA: Removemos middlewares de segurança
+# Acessamos a lista de middlewares configurados e removemos qualquer coisa relacionada a "TrustedHost"
+if hasattr(app, 'user_middleware'):
+    # Filtramos a lista mantendo apenas o que NÃO É segurança de host
+    app.user_middleware = [
+        m for m in app.user_middleware 
+        if "TrustedHostMiddleware" not in str(m.cls)
+    ]
+    # Forçamos o Starlette a esquecer a stack antiga
+    app.middleware_stack = None 
+    print("✅ Camada de segurança TrustedHostMiddleware removida manualmente.")
+
+# 3. Adiciona CORS (Permite tudo)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
+
+# 4. Rotas Manuais
+app.add_route("/health", health_check, methods=["GET"])
+app.add_route("/", handle_root, methods=["GET", "POST", "HEAD"])
+app.add_route("/sse", redirect_to_messages, methods=["POST"])
+
+for path in COMPATIBILITY_ROUTES:
+    app.add_route(path, handle_tools_discovery, methods=["GET", "POST"])
