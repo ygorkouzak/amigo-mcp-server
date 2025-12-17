@@ -1,70 +1,169 @@
 import os
-import json
-import asyncio
-from starlette.applications import Starlette
-from starlette.responses import StreamingResponse, JSONResponse
-from starlette.routing import Route
+import httpx
+from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+# --- INÍCIO DO PATCH DE SEGURANÇA ---
+# Este bloco DEVE vir antes de importar FastMCP.
+# Ele corrige o erro "Request validation failed" forçando a aceitação do host do Render.
+
+import mcp.server.sse
+
+# 1. Guardamos a função original da biblioteca
+_original_connect_sse = mcp.server.sse.connect_sse
+
+# 2. Criamos nossa versão permissiva
+@asynccontextmanager
+async def patched_connect_sse(scope, receive, send, permitted_origins=None):
+    # Ignoramos a lista restrita original e permitimos tudo (*) ou especificamente o Render
+    # Isso resolve o erro 421/ValueError
+    permissive_origins = ["*", "amigo-mcp-server.onrender.com", "localhost", "127.0.0.1"]
+    
+    async with _original_connect_sse(scope, receive, send, permitted_origins=permissive_origins) as streams:
+        yield streams
+
+# 3. Aplicamos o patch na biblioteca
+mcp.server.sse.connect_sse = patched_connect_sse
+# --- FIM DO PATCH ---
+
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
-# ======================
-# MCP CONFIG
-# ======================
+# Carrega variáveis
+load_dotenv()
 
-mcp = FastMCP(name="amigo-scheduler")
+# --- CONFIGURAÇÕES ---
+AMIGO_API_URL = "https://amigobot-api.amigoapp.com.br"
+API_TOKEN = os.getenv("AMIGO_API_TOKEN")
+
+CONFIG = {
+    "PLACE_ID": int(os.getenv("PLACE_ID", 6955)),
+    "EVENT_ID": int(os.getenv("EVENT_ID", 526436)),
+    "ACCOUNT_ID": int(os.getenv("ACCOUNT_ID", 74698)),
+    "USER_ID": int(os.getenv("USER_ID", 28904)),
+    "INSURANCE_ID": int(os.getenv("INSURANCE_ID", 1))
+}
+
+# --- SERVIDOR MCP ---
+mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
-def ping() -> str:
-    return "pong"
+async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
+    """Busca paciente por nome ou CPF na base de dados da Amigo."""
+    if not API_TOKEN:
+        return "Erro: AMIGO_API_TOKEN ausente."
+    
+    headers = {"Authorization": f"Bearer {API_TOKEN}"}
+    params = {}
+    
+    if nome:
+        params['name'] = nome
+    if cpf:
+        params['cpf'] = cpf
+    
+    if not params:
+        return "Erro: Forneça nome ou CPF para buscar."
+
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(
+                f"{AMIGO_API_URL}/patients",
+                params=params,
+                headers=headers,
+                timeout=30.0
+            )
+            resp.raise_for_status()
+            return str(resp.json())
+        except Exception as e:
+            return f"Erro ao buscar paciente: {str(e)}"
 
 @mcp.tool()
-def schedule_task(task: str) -> str:
-    return f"Tarefa '{task}' agendada com sucesso"
+async def consultar_horarios(data: str) -> str:
+    """Consulta horários disponíveis para agendamento."""
+    if not API_TOKEN:
+        return "Erro: AMIGO_API_TOKEN ausente."
+    
+    headers = {"Authorization": f"Bearer {API_TOKEN}"}
+    params = {
+        "date": data,
+        "event_id": CONFIG["EVENT_ID"],
+        "place_id": CONFIG["PLACE_ID"],
+        "insurance_id": CONFIG["INSURANCE_ID"]
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(
+                f"{AMIGO_API_URL}/calendar",
+                params=params,
+                headers=headers,
+                timeout=30.0
+            )
+            resp.raise_for_status()
+            return str(resp.json())
+        except Exception as e:
+            return f"Erro ao consultar horários: {str(e)}"
 
-# ======================
-# SSE HANDLER
-# ======================
+@mcp.tool()
+async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
+    """Realiza o agendamento de uma consulta."""
+    if not API_TOKEN:
+        return "Erro: AMIGO_API_TOKEN ausente."
+    
+    headers = {"Authorization": f"Bearer {API_TOKEN}"}
+    body = {
+        "insurance_id": CONFIG["INSURANCE_ID"],
+        "event_id": CONFIG["EVENT_ID"],
+        "place_id": CONFIG["PLACE_ID"],
+        "start_date": start_date,
+        "patient_id": patient_id,
+        "account_id": CONFIG["ACCOUNT_ID"],
+        "user_id": CONFIG["USER_ID"],
+        "chat_id": "doublex_integration",
+        "scheduler_phone": telefone,
+        "is_dependent_schedule": False
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.post(
+                f"{AMIGO_API_URL}/attendances",
+                json=body,
+                headers=headers,
+                timeout=30.0
+            )
+            return f"Status: {resp.status_code}. Resposta: {str(resp.json())}"
+        except Exception as e:
+            return f"Erro ao agendar consulta: {str(e)}"
 
-async def sse_endpoint(request):
-    async def event_generator():
-        # evento inicial (handshake)
-        yield "event: ready\ndata: MCP conectado\n\n"
+# --- ENDPOINT DE HEALTH CHECK ---
+async def health_check(request):
+    """Endpoint simples para verificar se o servidor está online"""
+    return JSONResponse({
+        "status": "online",
+        "server": "amigo-mcp-server",
+        "mode": "MCP Protocol",
+        "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"],
+        "sse_endpoint": "https://amigo-mcp-server.onrender.com/sse"
+    })
 
-        # loop simples (pode evoluir depois)
-        while True:
-            await asyncio.sleep(15)
-            yield "event: heartbeat\ndata: alive\n\n"
+# --- CONFIGURAÇÃO FINAL DO STARLETTE ---
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # IMPORTANTE p/ proxy
-        },
-    )
+# 1. Obtemos o app Starlette original do MCP
+starlette_app = mcp.sse_app()
 
-# ======================
-# MCP TOOL INVOCATION
-# ======================
+# 2. Adicionamos o Middleware de CORS (necessário para acesso externo)
+starlette_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
 
-async def call_tool(request):
-    payload = await request.json()
+# 3. Inserimos a rota de health check
+starlette_app.add_route("/health", health_check, methods=["GET"])
 
-    result = await mcp.run(
-        payload["tool"],
-        payload.get("arguments", {})
-    )
-
-    return JSONResponse(result)
-
-# ======================
-# STARLETTE APP
-# ======================
-
-routes = [
-    Route("/sse", sse_endpoint, methods=["GET"]),
-    Route("/call", call_tool, methods=["POST"]),
-]
-
-starlette_app = Starlette(routes=routes)
+# O objeto 'starlette_app' será executado pelo Uvicorn
