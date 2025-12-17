@@ -1,10 +1,7 @@
 import os
 import httpx
 from mcp.server.fastmcp import FastMCP
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.routing import Route
 from starlette.responses import JSONResponse
 from dotenv import load_dotenv
 
@@ -28,7 +25,12 @@ mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
-    """Busca paciente por nome ou CPF na base de dados da Amigo."""
+    """Busca paciente por nome ou CPF na base de dados da Amigo.
+    
+    Args:
+        nome: Nome completo ou parcial do paciente
+        cpf: CPF do paciente (apenas números)
+    """
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -58,7 +60,11 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
-    """Consulta horários disponíveis para agendamento."""
+    """Consulta horários disponíveis para agendamento em uma data específica.
+    
+    Args:
+        data: Data no formato YYYY-MM-DD (ex: 2024-12-20)
+    """
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -85,7 +91,13 @@ async def consultar_horarios(data: str) -> str:
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Realiza o agendamento de uma consulta."""
+    """Realiza o agendamento de uma consulta para o paciente.
+    
+    Args:
+        start_date: Data e hora do agendamento no formato ISO
+        patient_id: ID do paciente obtido pela busca
+        telefone: Telefone de contato do paciente
+    """
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -117,63 +129,57 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
 
 # --- ENDPOINT DE HEALTH CHECK ---
 async def health_check(request):
-    """Endpoint simples para verificar se o servidor está online"""
-    return JSONResponse({
-        "status": "online",
-        "server": "amigo-mcp-server",
-        "mode": "MCP Protocol",
-        "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"],
-        "sse_endpoint": "https://amigo-mcp-server.onrender.com/sse"
-    })
+    """Verifica status"""
+    return JSONResponse({"status": "online", "mode": "MCP + Compatibility"})
 
-# --- ENDPOINT DE DESCOBERTA (O "CRACHÁ" PARA O DOUBLE X) ---
-# O Double X está procurando a lista de ferramentas nestes endereços.
-# Vamos entregar o JSON descritivo para ele parar de dar erro 404.
+# --- RESPOSTA DE DESCOBERTA DE TOOLS (COMPATIBILIDADE) ---
+# Esta função entrega o JSON que o Double X está procurando e não achava (404)
 async def handle_tools_discovery(request):
-    tools_list = [
-        {
-            "name": "buscar_paciente",
-            "description": "Busca paciente por nome ou CPF na base de dados da Amigo.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "nome": {"type": "string", "description": "Nome do paciente"},
-                    "cpf": {"type": "string", "description": "CPF apenas números"}
+    tools_schema = {
+        "tools": [
+            {
+                "name": "buscar_paciente",
+                "description": "Busca paciente por nome ou CPF.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "nome": {"type": "string"},
+                        "cpf": {"type": "string"}
+                    }
+                }
+            },
+            {
+                "name": "consultar_horarios",
+                "description": "Consulta horários disponíveis.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "data": {"type": "string", "description": "YYYY-MM-DD"}
+                    },
+                    "required": ["data"]
+                }
+            },
+            {
+                "name": "agendar_consulta",
+                "description": "Agenda consulta.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string"},
+                        "patient_id": {"type": "integer"},
+                        "telefone": {"type": "string"}
+                    },
+                    "required": ["start_date", "patient_id", "telefone"]
                 }
             }
-        },
-        {
-            "name": "consultar_horarios",
-            "description": "Consulta horários disponíveis em uma data.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "data": {"type": "string", "description": "Data YYYY-MM-DD"}
-                },
-                "required": ["data"]
-            }
-        },
-        {
-            "name": "agendar_consulta",
-            "description": "Agenda uma consulta.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "start_date": {"type": "string", "description": "Data ISO ex: 2024-12-20T14:30:00"},
-                    "patient_id": {"type": "integer", "description": "ID do paciente"},
-                    "telefone": {"type": "string", "description": "Telefone de contato"}
-                },
-                "required": ["start_date", "patient_id", "telefone"]
-            }
-        }
-    ]
-    return JSONResponse({"tools": tools_list})
+        ]
+    }
+    return JSONResponse(tools_schema)
 
-# --- MIDDLEWARE DE HOST (Mantém o servidor seguro e acessível) ---
+# --- MIDDLEWARE DE CORREÇÃO DE HOST ---
 class FixHostHeaderMiddleware:
     def __init__(self, app):
         self.app = app
-        
     async def __call__(self, scope, receive, send):
         if scope['type'] == 'http':
             headers = dict(scope['headers'])
@@ -181,15 +187,9 @@ class FixHostHeaderMiddleware:
             scope['headers'] = list(headers.items())
         await self.app(scope, receive, send)
 
-# --- CONFIGURAÇÃO FINAL ---
-
-# 1. App original do MCP
+# --- CONFIGURAÇÃO DAS ROTAS ---
 starlette_app = mcp.sse_app()
-
-# 2. Middleware de Host (PRIMEIRO)
 starlette_app.add_middleware(FixHostHeaderMiddleware)
-
-# 3. Middleware de CORS
 starlette_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -198,18 +198,20 @@ starlette_app.add_middleware(
     allow_credentials=True,
 )
 
-# 4. Rota Health Check
+# Rota Health Check
 starlette_app.add_route("/health", health_check, methods=["GET"])
 
-# 5. ROTAS DE COMPATIBILIDADE PARA O DOUBLE X (Resolve os erros 404)
-# Registramos todas as URLs que ele tentou acessar nos logs
-debug_paths = [
-    "/tools", 
-    "/tools/list", 
-    "/api/tools", 
-    "/api/tools/list", 
-    "/mcp/tools/list"
+# --- AQUI ESTÁ A SOLUÇÃO DOS ERROS 404 ---
+# Mapeamos TODAS as URLs que apareceram no seu log de erro para a função que entrega a lista.
+routes_to_fix = [
+    "/tools", "/tools/list", 
+    "/api/tools", "/api/tools/list", 
+    "/mcp/tools/list",
+    "/sse/tools", "/sse/tools/list",
+    "/sse/api/tools", "/sse/api/tools/list",
+    "/sse/mcp/tools/list"
 ]
 
-for path in debug_paths:
+for path in routes_to_fix:
+    # Aceitamos tanto GET quanto POST para garantir
     starlette_app.add_route(path, handle_tools_discovery, methods=["GET", "POST"])
