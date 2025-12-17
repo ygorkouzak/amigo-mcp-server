@@ -2,7 +2,8 @@ import os
 import httpx
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
+from starlette.routing import Route
 from dotenv import load_dotenv
 
 # Carrega variáveis
@@ -25,7 +26,12 @@ mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
-    """Busca paciente por nome ou CPF na base de dados da Amigo."""
+    """Busca paciente por nome ou CPF na base de dados da Amigo.
+    
+    Args:
+        nome: Nome completo ou parcial do paciente
+        cpf: CPF do paciente (apenas números)
+    """
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -55,7 +61,11 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
-    """Consulta horários disponíveis para agendamento em uma data específica."""
+    """Consulta horários disponíveis para agendamento em uma data específica.
+    
+    Args:
+        data: Data no formato YYYY-MM-DD (ex: 2024-12-20)
+    """
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -82,7 +92,13 @@ async def consultar_horarios(data: str) -> str:
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Realiza o agendamento de uma consulta para o paciente."""
+    """Realiza o agendamento de uma consulta para o paciente.
+    
+    Args:
+        start_date: Data e hora do agendamento no formato ISO
+        patient_id: ID do paciente obtido pela busca
+        telefone: Telefone de contato do paciente
+    """
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -159,6 +175,29 @@ async def handle_tools_discovery(request):
     }
     return JSONResponse(tools_schema)
 
+# --- FUNÇÃO DE REDIRECIONAMENTO (CORREÇÃO DO ERRO 500) ---
+async def redirect_to_messages(request):
+    # Redireciona qualquer POST na raiz ou /sse para o endpoint correto /messages/
+    # O status 307 (Temporary Redirect) obriga o cliente a reenviar o corpo (JSON) do POST.
+    return RedirectResponse(url="/messages/", status_code=307)
+
+# --- HANDLER DA RAIZ ---
+async def handle_root(request):
+    # Se for POST (Double X tentando falar), redireciona para /messages/
+    if request.method == "POST":
+        return await redirect_to_messages(request)
+    
+    # Se for GET ou HEAD, retorna status online (Render Health Check)
+    return JSONResponse({
+        "status": "online", 
+        "message": "Amigo MCP Server Running",
+        "endpoints": {
+            "tools": "/tools/list",
+            "messages": "/messages/",
+            "sse": "/sse"
+        }
+    })
+
 # --- MIDDLEWARE DE HOST ---
 class FixHostHeaderMiddleware:
     def __init__(self, app):
@@ -181,39 +220,16 @@ starlette_app.add_middleware(
     allow_credentials=True,
 )
 
-# --- LÓGICA DE REDIRECIONAMENTO DE MENSAGENS ---
-# Esta função pega requisições POST mal direcionadas e manda para o lugar certo (/messages/)
-async def forward_to_messages(request):
-    for route in starlette_app.routes:
-        if hasattr(route, "path") and route.path == "/messages/":
-            return await route.endpoint(request)
-    return JSONResponse({"error": "Handler de mensagens não encontrado"}, status_code=500)
-
-# --- HANDLER DA RAIZ (SOLUÇÃO DOS SEUS LOGS DE ERRO) ---
-async def handle_root(request):
-    # Se for POST, assumimos que é o Double X tentando falar com o bot
-    if request.method == "POST":
-        return await forward_to_messages(request)
-    
-    # Se for GET ou HEAD, retornamos status online (para navegador e render health check)
-    return JSONResponse({
-        "status": "online",
-        "message": "Amigo MCP Server Running",
-        "docs": "/tools/list"
-    })
-
-# --- REGISTRO DE ROTAS ---
-
 # 1. Rota Health Check
 starlette_app.add_route("/health", health_check, methods=["GET"])
 
-# 2. Rota Raiz (Cobre os erros GET /, POST / e HEAD /)
+# 2. Rota Raiz (Resolve: POST / = 500 Error -> vira Redirect 307)
 starlette_app.add_route("/", handle_root, methods=["GET", "POST", "HEAD"])
 
-# 3. Rota SSE mal direcionada (Cobre erro POST /sse)
-starlette_app.add_route("/sse", forward_to_messages, methods=["POST"])
+# 3. Rota SSE mal direcionada (Resolve: POST /sse = 405 -> vira Redirect 307)
+starlette_app.add_route("/sse", redirect_to_messages, methods=["POST"])
 
-# 4. Rotas de Compatibilidade de Tools (Cobre erros 404 de discovery)
+# 4. Rotas de Compatibilidade de Tools (Resolve: Erros 404)
 routes_to_fix = [
     "/tools", "/tools/list", 
     "/api/tools", "/api/tools/list", 
