@@ -1,12 +1,35 @@
 import os
 import httpx
-from mcp.server.fastmcp import FastMCP
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.cors import CORSMiddleware
-from starlette.routing import Route, Mount
-from starlette.responses import JSONResponse
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+
+# --- INÍCIO DO PATCH DE SEGURANÇA ---
+# Este bloco DEVE vir antes de importar FastMCP.
+# Ele corrige o erro "Request validation failed" forçando a aceitação do host do Render.
+
+import mcp.server.sse
+
+# 1. Guardamos a função original da biblioteca
+_original_connect_sse = mcp.server.sse.connect_sse
+
+# 2. Criamos nossa versão permissiva
+@asynccontextmanager
+async def patched_connect_sse(scope, receive, send, permitted_origins=None):
+    # Ignoramos a lista restrita original e permitimos tudo (*) ou especificamente o Render
+    # Isso resolve o erro 421/ValueError
+    permissive_origins = ["*", "amigo-mcp-server.onrender.com", "localhost", "127.0.0.1"]
+    
+    async with _original_connect_sse(scope, receive, send, permitted_origins=permissive_origins) as streams:
+        yield streams
+
+# 3. Aplicamos o patch na biblioteca
+mcp.server.sse.connect_sse = patched_connect_sse
+# --- FIM DO PATCH ---
+
+from mcp.server.fastmcp import FastMCP
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 # Carrega variáveis
 load_dotenv()
@@ -28,15 +51,7 @@ mcp = FastMCP("amigo-scheduler")
 
 @mcp.tool()
 async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
-    """Busca paciente por nome ou CPF na base de dados da Amigo.
-    
-    Args:
-        nome: Nome completo ou parcial do paciente
-        cpf: CPF do paciente (apenas números)
-    
-    Returns:
-        Dados do paciente encontrado em formato JSON
-    """
+    """Busca paciente por nome ou CPF na base de dados da Amigo."""
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -66,14 +81,7 @@ async def buscar_paciente(nome: str = None, cpf: str = None) -> str:
 
 @mcp.tool()
 async def consultar_horarios(data: str) -> str:
-    """Consulta horários disponíveis para agendamento em uma data específica.
-    
-    Args:
-        data: Data no formato YYYY-MM-DD (ex: 2024-12-20)
-    
-    Returns:
-        Lista de horários disponíveis em formato JSON
-    """
+    """Consulta horários disponíveis para agendamento."""
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -100,16 +108,7 @@ async def consultar_horarios(data: str) -> str:
 
 @mcp.tool()
 async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> str:
-    """Realiza o agendamento de uma consulta para o paciente.
-    
-    Args:
-        start_date: Data e hora do agendamento no formato ISO (ex: 2024-12-20T14:30:00)
-        patient_id: ID do paciente obtido pela busca
-        telefone: Telefone de contato do paciente
-    
-    Returns:
-        Confirmação do agendamento com detalhes
-    """
+    """Realiza o agendamento de uma consulta."""
     if not API_TOKEN:
         return "Erro: AMIGO_API_TOKEN ausente."
     
@@ -147,32 +146,15 @@ async def health_check(request):
         "server": "amigo-mcp-server",
         "mode": "MCP Protocol",
         "tools": ["buscar_paciente", "consultar_horarios", "agendar_consulta"],
-        "endpoint_sse": "https://amigo-mcp-server.onrender.com/sse"
+        "sse_endpoint": "https://amigo-mcp-server.onrender.com/sse"
     })
 
-# --- MIDDLEWARE PARA CORRIGIR O HOST HEADER ---
-# Essencial para o Render não dar erro 421 (Invalid Host Header) no MCP
-class FixHostHeaderMiddleware:
-    def __init__(self, app):
-        self.app = app
-        
-    async def __call__(self, scope, receive, send):
-        if scope['type'] == 'http':
-            headers = dict(scope['headers'])
-            # Força o host ser localhost para o MCP aceitar a conexão
-            headers[b'host'] = b'localhost'
-            scope['headers'] = list(headers.items())
-        await self.app(scope, receive, send)
+# --- CONFIGURAÇÃO FINAL DO STARLETTE ---
 
-# --- CONFIGURAÇÃO FINAL ---
-
-# 1. Obtemos o app Starlette original do MCP (que já tem a rota /sse embutida)
+# 1. Obtemos o app Starlette original do MCP
 starlette_app = mcp.sse_app()
 
-# 2. Adicionamos o Middleware de correção de Host PRIMEIRO
-starlette_app.add_middleware(FixHostHeaderMiddleware)
-
-# 3. Adicionamos o Middleware de CORS (para aceitar conexões externas)
+# 2. Adicionamos o Middleware de CORS (necessário para acesso externo)
 starlette_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -181,7 +163,7 @@ starlette_app.add_middleware(
     allow_credentials=True,
 )
 
-# 4. Inserimos a rota de health check manualmente no app do MCP
+# 3. Inserimos a rota de health check
 starlette_app.add_route("/health", health_check, methods=["GET"])
 
-# O objeto 'starlette_app' é o que o uvicorn vai rodar
+# O objeto 'starlette_app' será executado pelo Uvicorn
