@@ -2,7 +2,8 @@ import os
 import httpx
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
+from starlette.routing import Route
 from dotenv import load_dotenv
 
 # Carrega variáveis
@@ -129,11 +130,9 @@ async def agendar_consulta(start_date: str, patient_id: int, telefone: str) -> s
 
 # --- ENDPOINT DE HEALTH CHECK ---
 async def health_check(request):
-    """Verifica status"""
     return JSONResponse({"status": "online", "mode": "MCP + Compatibility"})
 
-# --- RESPOSTA DE DESCOBERTA DE TOOLS (COMPATIBILIDADE) ---
-# Esta função entrega o JSON que o Double X está procurando e não achava (404)
+# --- COMPATIBILIDADE: DESCOBERTA DE TOOLS ---
 async def handle_tools_discovery(request):
     tools_schema = {
         "tools": [
@@ -176,7 +175,7 @@ async def handle_tools_discovery(request):
     }
     return JSONResponse(tools_schema)
 
-# --- MIDDLEWARE DE CORREÇÃO DE HOST ---
+# --- MIDDLEWARE DE HOST ---
 class FixHostHeaderMiddleware:
     def __init__(self, app):
         self.app = app
@@ -187,7 +186,7 @@ class FixHostHeaderMiddleware:
             scope['headers'] = list(headers.items())
         await self.app(scope, receive, send)
 
-# --- CONFIGURAÇÃO DAS ROTAS ---
+# --- INICIALIZAÇÃO DO APP ---
 starlette_app = mcp.sse_app()
 starlette_app.add_middleware(FixHostHeaderMiddleware)
 starlette_app.add_middleware(
@@ -198,11 +197,10 @@ starlette_app.add_middleware(
     allow_credentials=True,
 )
 
-# Rota Health Check
+# 1. Rota Health Check
 starlette_app.add_route("/health", health_check, methods=["GET"])
 
-# --- AQUI ESTÁ A SOLUÇÃO DOS ERROS 404 ---
-# Mapeamos TODAS as URLs que apareceram no seu log de erro para a função que entrega a lista.
+# 2. Rotas de Compatibilidade de Tools (Resolve erro 404)
 routes_to_fix = [
     "/tools", "/tools/list", 
     "/api/tools", "/api/tools/list", 
@@ -211,7 +209,17 @@ routes_to_fix = [
     "/sse/api/tools", "/sse/api/tools/list",
     "/sse/mcp/tools/list"
 ]
-
 for path in routes_to_fix:
-    # Aceitamos tanto GET quanto POST para garantir
     starlette_app.add_route(path, handle_tools_discovery, methods=["GET", "POST"])
+
+# 3. CORREÇÃO FINAL (Resolve erro 405): Redireciona POST /sse para /messages/
+# Se o Double X tentar enviar mensagem na rota errada, nós redirecionamos.
+async def forward_to_messages(request):
+    # Encontramos o handler oficial de mensagens dentro do app do MCP
+    for route in starlette_app.routes:
+        if hasattr(route, "path") and route.path == "/messages/":
+             # Repassamos a requisição para o handler correto
+            return await route.endpoint(request)
+    return JSONResponse({"error": "Handler de mensagens não encontrado"}, status_code=500)
+
+starlette_app.add_route("/sse", forward_to_messages, methods=["POST"])
