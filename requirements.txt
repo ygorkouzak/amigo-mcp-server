@@ -1,5 +1,4 @@
-mcp==1.24.0
-httpx
-uvicorn
-starlette
-python-dotenv
+mcp>=1.0.0
+httpx>=0.25.0
+python-dotenv>=1.0.0
+uvicorn>=0.25.0
