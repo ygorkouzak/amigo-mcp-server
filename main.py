@@ -155,25 +155,21 @@ async def health_check(request):
         "instructions": "Connect MCP client to: https://amigo-mcp-server.onrender.com/sse"
     })
 
-# --- CONFIGURAÇÃO CORRIGIDA ---
-# Adiciona middleware CORS diretamente ao MCP
-mcp_middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-        allow_credentials=True,
-    ),
-]
+# --- CONFIGURAÇÃO FINAL ---
+# Obtém o app SSE do MCP (já vem com rotas /sse e /messages/)
+mcp_sse_app = mcp.sse_app()
 
-# Obtém o app SSE do MCP com middleware customizado
-mcp_sse_app = mcp.sse_app(custom_middleware=mcp_middleware)
+# Adiciona middleware CORS ao app gerado
+mcp_sse_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
 
-# Adiciona a rota de health check ao próprio MCP app usando custom_route
-@mcp.custom_route("/health", methods=["GET"])
-async def mcp_health_check(request):
-    return await health_check(request)
+# Adiciona a rota de health check
+mcp_sse_app.routes.insert(0, Route("/health", health_check, methods=["GET"]))
 
-# Exporta o app diretamente (montado na raiz)
+# Exporta o app
 starlette_app = mcp_sse_app
